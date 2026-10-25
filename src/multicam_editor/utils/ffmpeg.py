@@ -4,11 +4,11 @@
 Provides helpers for encoding, trimming, concatenation with proper
 subprocess management, cancellation support, and temp file cleanup.
 
-NOTE ON WINDOWS COMMAND-LINE LIMITS:
+NOTE ON FILTER GRAPH FILES AND WINDOWS COMMAND-LINE LIMITS:
     The build_single_pass_filter_complex_args function writes the filter_complex
-    graph to a temp file and uses -filter_complex_script instead of inline
-    -filter_complex. This avoids Windows WinError 206 ("The filename or extension
-    is too long") which occurs when command lines exceed ~8191 characters.
+    graph to a temp file to avoid Windows WinError 206 ("The filename or extension
+    is too long"). FFmpeg 7.1+ reads it with -/filter_complex; older versions use
+    -filter_complex_script.
     
     Lifecycle: The temp filter script is created by build_single_pass_filter_complex_args
     and should be deleted by the caller (render_single_pass) in a finally block.
@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,31 @@ def _find_ffmpeg() -> Optional[str]:
                 _ffmpeg_path = p
                 return _ffmpeg_path
     return None
+
+def _supports_ffmpeg_option_file_syntax(ffmpeg_executable: str) -> bool:
+    """Return whether FFmpeg supports the -/option file syntax (7.1+)."""
+    try:
+        result = subprocess.run(
+            [ffmpeg_executable, "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("Could not determine FFmpeg version; using legacy syntax")
+        return False
+
+    version_text = result.stdout or result.stderr
+    match = re.search(r"ffmpeg version\s+n?(\d+)\.(\d+)", version_text)
+
+    if not match:
+        logger.warning("Could not parse FFmpeg version; using legacy syntax")
+        return False
+
+    version = (int(match.group(1)), int(match.group(2)))
+    return version >= (7, 1)
 
 
 def is_ffmpeg_available() -> bool:
@@ -797,7 +823,8 @@ def build_single_pass_filter_complex_args(
     4. Single CFR encode output
 
     To avoid Windows command-line length limits (WinError 206), the filter_complex
-    is written to a temp file and passed via -filter_complex_script.
+    is written to a temp file. FFmpeg 7.1+ reads it via -/filter_complex; older
+    versions use -filter_complex_script.
 
     Args:
         cuts: List of cut definitions with fields:
@@ -916,9 +943,16 @@ def build_single_pass_filter_complex_args(
         logger.error("Failed to write filter script: %s", e)
         return [], None
 
-    # Build output arguments using -filter_complex_script instead of -filter_complex
+    # FFmpeg 7.1 introduced option-file syntax (-/option). Preserve support for
+    # older FFmpeg releases by using their dedicated filter-script option.
+    ffmpeg_executable = _find_ffmpeg() or args[0]
+    filter_option = (
+        "-/filter_complex"
+        if _supports_ffmpeg_option_file_syntax(ffmpeg_executable)
+        else "-filter_complex_script"
+    )
     args.extend([
-        "-filter_complex_script", filter_script_path,
+        filter_option, filter_script_path,
         "-map", "[outv]",
         "-c:v", encoder,
         *quality_args,

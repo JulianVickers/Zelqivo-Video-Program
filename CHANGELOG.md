@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a hardcoded path, and fail with a clear message pointing at BtbN LGPL builds.
 
 ### Fixed
+- Single-pass rendering now uses FFmpeg 7.1+'s file-backed filter option syntax,
+  while retaining the legacy filter-script option for older FFmpeg versions.
 - GPU preflight now recognizes Apple Silicon acceleration through PyTorch's MPS
   backend instead of incorrectly warning that every Mac has no GPU.
 

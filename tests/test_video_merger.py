@@ -484,8 +484,12 @@ class TestBuildSinglePassFilterComplexArgs:
         assert args == []
         assert filter_path is None
 
-    def test_single_cut_produces_valid_filter(self, tmp_path):
+    def test_single_cut_produces_valid_filter(self, tmp_path, monkeypatch):
         """Single cut should produce valid filter_complex in script file."""
+        monkeypatch.setattr(
+            "multicam_editor.utils.ffmpeg._supports_ffmpeg_option_file_syntax",
+            lambda _: True,
+        )
         source = tmp_path / "video.mp4"
         source.write_text("fake")
         
@@ -494,7 +498,7 @@ class TestBuildSinglePassFilterComplexArgs:
         
         try:
             assert args[0] == "ffmpeg"
-            assert "-filter_complex_script" in args
+            assert "-/filter_complex" in args
             
             # Read filter content from script file
             assert filter_path is not None
@@ -504,6 +508,25 @@ class TestBuildSinglePassFilterComplexArgs:
             assert "trim=start=0.000:end=5.000" in fc_value
             assert "setpts=PTS-STARTPTS" in fc_value
             assert "concat=n=1:v=1:a=0" in fc_value
+        finally:
+            if filter_path and os.path.exists(filter_path):
+                os.remove(filter_path)
+
+    def test_legacy_ffmpeg_uses_filter_complex_script(self, tmp_path, monkeypatch):
+        """Older FFmpeg versions should use the legacy filter-script option."""
+        monkeypatch.setattr(
+            "multicam_editor.utils.ffmpeg._supports_ffmpeg_option_file_syntax",
+            lambda _: False,
+        )
+        source = tmp_path / "video.mp4"
+        source.write_text("fake")
+        cuts = [CutDefinition(str(source), 0, 1000, 0, camera_index=0)]
+
+        args, filter_path = build_single_pass_filter_complex_args(cuts, "/output.mp4")
+        try:
+            assert "-filter_complex_script" in args
+            assert "-/filter_complex" not in args
+            assert filter_path is not None
         finally:
             if filter_path and os.path.exists(filter_path):
                 os.remove(filter_path)
@@ -677,12 +700,16 @@ class TestRenderSinglePass:
         def mock_run():
             # Find the filter script path from the args
             args = mock_proc.call_args[0][0]
-            if "-filter_complex_script" in args:
-                idx = args.index("-filter_complex_script")
-                filter_script_path = args[idx + 1]
-                filter_script_paths.append(filter_script_path)
-                # Verify file exists during render
-                assert os.path.isfile(filter_script_path), "Filter script should exist during render"
+            option = next(
+                (opt for opt in ("-/filter_complex", "-filter_complex_script") if opt in args),
+                None,
+            )
+            assert option is not None, "Expected an FFmpeg filter-graph file option"
+            idx = args.index(option)
+            filter_script_path = args[idx + 1]
+            filter_script_paths.append(filter_script_path)
+            # Verify file exists during render
+            assert os.path.isfile(filter_script_path), "Filter script should exist during render"
             return FFmpegResult(success=True, output_path=str(output))
         
         mock_proc_instance = MagicMock()
