@@ -410,19 +410,33 @@ def extract_audio_to_wav(
     sample_rate: int = 16000,
     mono: bool = True,
     timeout: float = 60.0,
+    channel_index: Optional[int] = None,
 ) -> FFmpegResult:
-    """Extract audio track from video to WAV file.
+    """Extract audio from a media file to WAV, optionally selecting one channel.
 
     Args:
-        video_path: Path to source video
+        video_path: Path to source media
         output_path: Destination WAV path (auto-generated if None)
         sample_rate: Target sample rate in Hz (default 16000 for sync)
-        mono: Convert to mono (default True)
+        mono: Convert the extracted audio to mono (default True)
         timeout: Max extraction time in seconds
+        channel_index: Optional zero-based input audio channel to extract alone.
+            When set, the selected channel is written as mono without mixing
+            it with the other input channels.
 
     Returns:
         FFmpegResult with output_path on success
     """
+    if channel_index is not None and (
+        isinstance(channel_index, bool)
+        or not isinstance(channel_index, int)
+        or channel_index < 0
+    ):
+        return FFmpegResult(
+            success=False,
+            error=f"Invalid channel_index {channel_index!r}: expected a non-negative integer",
+        )
+
     if not os.path.isfile(video_path):
         logger.error("extract_audio_to_wav: source not found: %s", video_path)
         return FFmpegResult(success=False, error=f"File not found: {video_path}")
@@ -437,14 +451,20 @@ def extract_audio_to_wav(
         "-ar", str(sample_rate),
     ]
 
-    if mono:
+    if channel_index is not None:
+        # Select one input channel; do not downmix the other microphone feeds.
+        args.extend(["-af", f"pan=mono|c0=c{channel_index}"])
+    elif mono:
+        # Preserve the legacy default behavior for existing callers.
         args.extend(["-ac", "1"])
 
     args.extend(["-f", "wav", output_path])
 
-    logger.info("Extracting audio: %s -> %s (sr=%d, mono=%s)",
-                os.path.basename(video_path), os.path.basename(output_path),
-                sample_rate, mono)
+    logger.info(
+        "Extracting audio: %s -> %s (sr=%d, mono=%s, channel=%s)",
+        os.path.basename(video_path), os.path.basename(output_path),
+        sample_rate, mono, channel_index,
+    )
 
     proc = FFmpegProcess(args, output_path)
     result = proc.run(timeout=timeout)

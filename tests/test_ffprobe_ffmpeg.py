@@ -509,3 +509,51 @@ class TestCustomFfmpegOverride:
         monkeypatch.setattr(ffmpeg, "_custom_ffmpeg_path", lambda: None)
         # Must not raise; discovery continues down the normal chain
         ffmpeg._find_ffmpeg()
+
+class TestExtractAudioToWavChannelSelection:
+    """Tests for independent channel extraction in extract_audio_to_wav."""
+
+    def test_selected_channel_uses_pan_filter(self, tmp_path):
+        source = tmp_path / "multichannel.wav"
+        source.touch()
+        expected = ffmpeg.FFmpegResult(success=True, output_path="selected.wav")
+
+        with patch("multicam_editor.utils.ffmpeg.FFmpegProcess") as process_cls:
+            process_cls.return_value.run.return_value = expected
+            result = ffmpeg.extract_audio_to_wav(
+                str(source), "selected.wav", channel_index=2
+            )
+
+        assert result is expected
+        args = process_cls.call_args.args[0]
+        assert args[args.index("-af") + 1] == "pan=mono|c0=c2"
+        assert "-ac" not in args
+        assert args[-3:] == ["-f", "wav", "selected.wav"]
+
+    def test_default_mono_behavior_is_unchanged(self, tmp_path):
+        source = tmp_path / "stereo.wav"
+        source.touch()
+
+        with patch("multicam_editor.utils.ffmpeg.FFmpegProcess") as process_cls:
+            process_cls.return_value.run.return_value = ffmpeg.FFmpegResult(
+                success=True, output_path="mono.wav"
+            )
+            ffmpeg.extract_audio_to_wav(str(source), "mono.wav")
+
+        args = process_cls.call_args.args[0]
+        assert "-ac" in args
+        assert args[args.index("-ac") + 1] == "1"
+        assert "-af" not in args
+
+    @pytest.mark.parametrize("channel_index", [-1, 1.5, True, "2"])
+    def test_invalid_channel_index_returns_failure(self, channel_index, tmp_path):
+        source = tmp_path / "multichannel.wav"
+        source.touch()
+
+        result = ffmpeg.extract_audio_to_wav(
+            str(source), "selected.wav", channel_index=channel_index
+        )
+
+        assert result.success is False
+        assert "channel_index" in result.error
+
