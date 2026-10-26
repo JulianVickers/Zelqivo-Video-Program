@@ -5,6 +5,10 @@ import pytest
 from multicam_editor.logic.audio_sources import (
     TimelineBoundaryConfig,
     TimelineBoundaryPolicy,
+    TimelinePlacementBasis,
+    TimelineSourceSpan,
+    build_preservation_timeline,
+    map_sources_to_output_timeline,
 )
 
 
@@ -29,13 +33,6 @@ def test_preserve_all_media_can_be_selected_with_string():
 def test_unknown_timeline_boundary_policy_is_rejected():
     with pytest.raises(ValueError, match="policy must be one of"):
         TimelineBoundaryConfig("trim_whatever_is_longer")
-
-
-from multicam_editor.logic.audio_sources import (
-    TimelinePlacementBasis,
-    TimelineSourceSpan,
-    build_preservation_timeline,
-)
 
 
 def test_preservation_timeline_covers_earliest_start_and_latest_end():
@@ -120,3 +117,62 @@ def test_timeline_placement_basis_accepts_serialized_value():
     span = TimelineSourceSpan("audio", 0, 1000, "sync_estimate")
 
     assert span.placement_basis is TimelinePlacementBasis.SYNC_ESTIMATE
+
+
+def test_output_placements_shift_all_sources_to_zero_based_timeline():
+    timeline = build_preservation_timeline([
+        TimelineSourceSpan(
+            "camera", 0, 30_000, TimelinePlacementBasis.USER_DEFINED
+        ),
+        TimelineSourceSpan(
+            "early_audio", -2_000, 34_000,
+            TimelinePlacementBasis.RECORDED_TIMESTAMP
+        ),
+        TimelineSourceSpan(
+            "late_camera", 1_500, 28_000,
+            TimelinePlacementBasis.SYNC_ESTIMATE
+        ),
+    ])
+
+    placements = map_sources_to_output_timeline(timeline)
+    by_id = {placement.source_id: placement for placement in placements}
+
+    assert by_id["early_audio"].output_start_ms == 0
+    assert by_id["early_audio"].output_end_ms == 34_000
+
+    assert by_id["camera"].output_start_ms == 2_000
+    assert by_id["camera"].output_end_ms == 32_000
+
+    assert by_id["late_camera"].output_start_ms == 3_500
+    assert by_id["late_camera"].output_end_ms == 31_500
+
+    # Mapping retains each complete source duration and its timing provenance.
+    assert by_id["camera"].duration_ms == 30_000
+    assert (
+        by_id["late_camera"].placement_basis
+        is TimelinePlacementBasis.SYNC_ESTIMATE
+    )
+
+
+def test_output_placements_preserve_source_order():
+    timeline = build_preservation_timeline([
+        TimelineSourceSpan("later", 1000, 2000, TimelinePlacementBasis.USER_DEFINED),
+        TimelineSourceSpan("earlier", -500, 1000, TimelinePlacementBasis.USER_DEFINED),
+    ])
+
+    placements = map_sources_to_output_timeline(timeline)
+
+    assert [p.source_id for p in placements] == ["later", "earlier"]
+    assert [p.output_start_ms for p in placements] == [1500, 0]
+
+
+def test_output_placement_end_is_start_plus_full_duration():
+    timeline = build_preservation_timeline([
+        TimelineSourceSpan("audio", -1000, 5000, TimelinePlacementBasis.USER_DEFINED),
+    ])
+
+    placement, = map_sources_to_output_timeline(timeline)
+
+    assert placement.output_start_ms == 0
+    assert placement.duration_ms == 5000
+    assert placement.output_end_ms == 5000

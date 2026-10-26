@@ -212,6 +212,21 @@ class PreservationTimeline:
         )
 
 
+@dataclass(frozen=True)
+class OutputTimelinePlacement:
+    """A source's position relative to the beginning of the output timeline."""
+
+    source_id: str
+    output_start_ms: int
+    duration_ms: int
+    placement_basis: TimelinePlacementBasis
+
+    @property
+    def output_end_ms(self) -> int:
+        """Exclusive end position relative to output time zero."""
+        return self.output_start_ms + self.duration_ms
+
+
 def build_preservation_timeline(
     source_spans: list[TimelineSourceSpan],
 ) -> PreservationTimeline:
@@ -243,6 +258,34 @@ def build_preservation_timeline(
         end_ms=max(ends),
         source_spans=tuple(source_spans),
     )
+
+
+def map_sources_to_output_timeline(
+    timeline: PreservationTimeline,
+) -> tuple[OutputTimelinePlacement, ...]:
+    """Map every placed source to output time without trimming its duration.
+
+    The earliest source starts at output time zero. All other source positions
+    are shifted by the same amount, preserving their relative timing.
+    """
+    placements = []
+
+    for span in timeline.source_spans:
+        if span.start_ms is None:
+            raise ValueError(
+                f"cannot map source with unknown placement: {span.source_id}"
+            )
+
+        placements.append(
+            OutputTimelinePlacement(
+                source_id=span.source_id,
+                output_start_ms=span.start_ms - timeline.start_ms,
+                duration_ms=span.duration_ms,
+                placement_basis=span.placement_basis,
+            )
+        )
+
+    return tuple(placements)
 
 
 def validate_audio_sources(sources: list[AudioSource]) -> None:
