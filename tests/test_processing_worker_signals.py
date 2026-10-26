@@ -65,3 +65,31 @@ class TestProcessingWorkerSignals:
             
             # Verify signal was NOT emitted
             mock_stats_slot.assert_not_called()
+
+    def test_audio_sources_are_passed_to_pipeline(self):
+        from multicam_editor.logic.audio_sources import AudioSource
+
+        source = AudioSource(
+            source_id="mixer-channel-1",
+            path="/recordings/mixer.wav",
+            channel_index=0,
+            speaker_id="travis",
+        )
+        worker = ProcessingWorker(
+            input_files=["camera-a.mp4", "camera-b.mp4"],
+            audio_sources=[source],
+        )
+
+        with patch("multicam_editor.logic.processing_worker.ProcessingPipeline") as mock_pipeline:
+            mock_pipeline.return_value.run.return_value = PipelineResult(
+                success=True,
+                output_path="out.mp4",
+            )
+            worker.run()
+
+        mock_pipeline.return_value.run.assert_called_once_with(
+            external_audio=None,
+            resolution="1080p",
+            output_path=None,
+            audio_sources=[source],
+        )

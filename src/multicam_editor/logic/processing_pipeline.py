@@ -30,6 +30,7 @@ from .active_speaker import (
 from .switching_strategy import SwitchingStrategy, select_switching_engine, DEFAULT_STRATEGY
 from .decision_engine import DecisionEngine, CutSegment
 from .pipeline_config import PipelineConfig
+from .audio_sources import AudioSource, validate_audio_sources
 from .qa_artifacts import QAArtifactExporter
 from .video_merger import SegmentRenderer, CutDefinition, concatenate_segments, render_single_pass
 from .checkpoint import PipelineCheckpoint, save_checkpoint, delete_checkpoint
@@ -403,6 +404,7 @@ class ProcessingPipeline:
         external_audio: Optional[str] = None,
         resolution: str = "1080p",
         output_path: Optional[str] = None,
+        audio_sources: Optional[List[AudioSource]] = None,
     ) -> PipelineResult:
         """Execute the full pipeline.
 
@@ -410,15 +412,37 @@ class ProcessingPipeline:
             external_audio: Optional path to external audio for sync.
             resolution: Target resolution (e.g., "1080p").
             output_path: Where to write final output. Uses temp if None.
+            audio_sources: Optional independently configured external audio sources.
 
         Returns:
             PipelineResult with success status and output path.
         """
         self._pipeline_start_time = time.time()
         self._cancelled = False
+        self._audio_sources = list(audio_sources) if audio_sources is not None else []
         self._external_audio_path = external_audio  # Store for hybrid detection
 
-        # Start QA artifact collection
+        # Validate configuration before starting QA artifact collection.
+        # Keep the pipeline's established contract: configuration errors are
+        # reported through the error signal and returned as a failed result.
+        try:
+            if audio_sources is not None and external_audio is not None:
+                raise ValueError("Pass either legacy external_audio or audio_sources, not both")
+            validate_audio_sources(self._audio_sources)
+        except ValueError as exc:
+            error_message = f"Invalid audio-source configuration: {exc}"
+            logger.error(error_message)
+            self.signals.error.emit(error_message)
+            return PipelineResult(success=False, error=error_message)
+
+        if self._audio_sources:
+            logger.info(
+                "Received %d configured external audio source(s); "
+                "multi-source processing is not yet enabled",
+                len(self._audio_sources),
+            )
+
+        # Start QA artifact collection only after configuration is valid.
         self._qa_exporter.start_run()
 
         try:

@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from ..utils.signals import ProcessingSignals
 from .processing_pipeline import ProcessingPipeline, PipelineProgress
 from .pipeline_config import PipelineConfig
+from .audio_sources import AudioSource
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class ProcessingWorker(QObject):
         output_path: Optional[str] = None,
         speaker_switching_enabled: bool = True,
         camera_speaker_mapping: Optional[dict[int, str]] = None,
+        audio_sources: Optional[List[AudioSource]] = None,
     ) -> None:
         super().__init__()
         self.input_files = input_files
@@ -57,6 +59,7 @@ class ProcessingWorker(QObject):
         self.output_path = output_path
         self.speaker_switching_enabled = speaker_switching_enabled
         self.camera_speaker_mapping = camera_speaker_mapping or {}
+        self.audio_sources = list(audio_sources) if audio_sources is not None else None
         self._pipeline: Optional[ProcessingPipeline] = None
 
     def cancel(self) -> None:
@@ -104,6 +107,7 @@ class ProcessingWorker(QObject):
                 external_audio=self.external_audio,
                 resolution=self.resolution,
                 output_path=self.output_path,
+                audio_sources=self.audio_sources,
             )
 
             if result.cancelled:
@@ -161,6 +165,7 @@ class ProcessingThread(QThread):
         speaker_switching_enabled: bool = True,
         camera_speaker_mapping: Optional[dict[int, str]] = None,
         parent: Optional[QObject] = None,
+        audio_sources: Optional[List[AudioSource]] = None,
     ) -> None:
         super().__init__(parent)
         self.input_files = input_files
@@ -169,6 +174,7 @@ class ProcessingThread(QThread):
         self.output_path = output_path
         self.speaker_switching_enabled = speaker_switching_enabled
         self.camera_speaker_mapping = camera_speaker_mapping or {}
+        self.audio_sources = list(audio_sources) if audio_sources is not None else None
         self._worker: Optional[ProcessingWorker] = None
 
     def cancel(self) -> None:
@@ -185,6 +191,7 @@ class ProcessingThread(QThread):
             self.output_path,
             self.speaker_switching_enabled,
             self.camera_speaker_mapping,
+            audio_sources=self.audio_sources,
         )
 
         # Connect worker signals to thread signals
