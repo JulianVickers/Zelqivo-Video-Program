@@ -21,6 +21,14 @@ class AudioOutputMode(str, Enum):
     PRESERVE_TRACKS = "preserve_tracks"
 
 
+
+class TimelineBoundaryPolicy(str, Enum):
+    """Whether output boundaries follow legacy behavior or preserve all media."""
+
+    STANDARD = "standard"
+    PRESERVE_ALL_MEDIA = "preserve_all_media"
+
+
 @dataclass(frozen=True)
 class AudioSource:
     """One independently addressable external audio source.
@@ -96,6 +104,29 @@ class AudioOutputConfig:
             except (TypeError, ValueError) as exc:
                 allowed = ", ".join(mode.value for mode in AudioOutputMode)
                 raise ValueError(f"mode must be one of: {allowed}") from exc
+
+
+
+@dataclass(frozen=True)
+class TimelineBoundaryConfig:
+    """Controls whether rendering may discard media at timeline boundaries.
+
+    STANDARD retains the application's existing behavior.
+    PRESERVE_ALL_MEDIA requires rendering to retain the complete duration of
+    every selected source, extending the output timeline when necessary.
+    """
+
+    policy: TimelineBoundaryPolicy = TimelineBoundaryPolicy.STANDARD
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy, TimelineBoundaryPolicy):
+            try:
+                object.__setattr__(
+                    self, "policy", TimelineBoundaryPolicy(self.policy)
+                )
+            except (TypeError, ValueError) as exc:
+                allowed = ", ".join(policy.value for policy in TimelineBoundaryPolicy)
+                raise ValueError(f"policy must be one of: {allowed}") from exc
 
 
 def validate_audio_sources(sources: list[AudioSource]) -> None:
