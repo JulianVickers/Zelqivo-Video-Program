@@ -198,6 +198,14 @@ def sync_external_audio(
         offset_ms, corr_score, window_sec = _cross_correlate_offset(ref_audio, ext_audio, sr)
         logger.info("Detected offset: %.1f ms (correlation=%.4f)", offset_ms, corr_score)
 
+        if corr_score < MIN_CORRELATION_SCORE:
+            msg = (
+                f"Low correlation ({corr_score:.4f}); "
+                "external audio alignment is unreliable"
+            )
+            logger.warning(msg)
+            return SyncResult("", 0.0, "failed", msg)
+
         # Reload at original quality for output
         _ensure_ai_deps()
         ext_full, sr_full = _librosa.load(external_audio, sr=None, mono=False)
@@ -248,8 +256,18 @@ def align_audio_offset(
         if len(ext_audio) < min_samples or len(ref_audio) < min_samples:
             return 0.0, "Audio too short for sync"
 
-        offset_ms, _, _ = _cross_correlate_offset(ref_audio, ext_audio, sr)
+        offset_ms, corr_score, _ = _cross_correlate_offset(ref_audio, ext_audio, sr)
+
+        if corr_score < MIN_CORRELATION_SCORE:
+            msg = (
+                f"Low correlation ({corr_score:.4f}); "
+                "external audio alignment is unreliable"
+            )
+            logger.warning(msg)
+            return 0.0, msg
+
         return offset_ms, "ok"
+        
     except Exception as e:
         logger.error("Offset calculation failed: %s", e, exc_info=True)
         return 0.0, str(e)

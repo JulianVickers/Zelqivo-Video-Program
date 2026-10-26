@@ -114,6 +114,22 @@ class TestApplyOffset:
 class TestSyncExternalAudio:
     """Integration tests for sync_external_audio."""
 
+    def test_low_correlation_rejects_unreliable_sync(self, tmp_path: Path):
+        """Uncorrelated external audio must not be reported as synchronized."""
+        ref_audio = _create_chirp(2.0)
+        ext_audio = np.zeros_like(ref_audio)
+
+        ref_path = tmp_path / "ref.wav"
+        ext_path = tmp_path / "ext.wav"
+        sf.write(str(ref_path), ref_audio, SR)
+        sf.write(str(ext_path), ext_audio, SR)
+
+        result = sync_external_audio(str(ext_path), str(ref_path), str(tmp_path))
+
+        assert result is not None
+        assert result.status == "failed"
+        assert "correlation" in result.message.lower()
+
     def test_sync_creates_output_file(self, tmp_path: Path):
         """sync_external_audio should create synced WAV file."""
         # Create test files
@@ -176,6 +192,21 @@ class TestSyncExternalAudio:
 
 class TestAlignAudioOffset:
     """Tests for align_audio_offset convenience function."""
+    def test_low_correlation_is_not_reported_as_success(self, tmp_path: Path):
+        """Silent external audio must not produce a trusted alignment."""
+        ref_audio = _create_chirp(2.0)
+        ext_audio = np.zeros_like(ref_audio)
+
+        ref_path = tmp_path / "ref.wav"
+        ext_path = tmp_path / "ext.wav"
+        sf.write(str(ref_path), ref_audio, SR)
+        sf.write(str(ext_path), ext_audio, SR)
+
+        offset, status = align_audio_offset(str(ext_path), str(ref_path))
+
+        assert offset == 0.0
+        assert status != "ok"
+        assert "correlation" in status.lower()
 
     def test_returns_offset_and_status(self, tmp_path: Path):
         """align_audio_offset should return offset and status."""
