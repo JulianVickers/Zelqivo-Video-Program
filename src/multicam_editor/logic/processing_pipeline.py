@@ -30,7 +30,11 @@ from .active_speaker import (
 from .switching_strategy import SwitchingStrategy, select_switching_engine, DEFAULT_STRATEGY
 from .decision_engine import DecisionEngine, CutSegment
 from .pipeline_config import PipelineConfig
-from .audio_sources import AudioSource, validate_audio_sources
+from .audio_sources import (
+    AudioSource,
+    TimelineBoundaryConfig,
+    validate_audio_sources,
+)
 from .qa_artifacts import QAArtifactExporter
 from .video_merger import SegmentRenderer, CutDefinition, concatenate_segments, render_single_pass
 from .checkpoint import PipelineCheckpoint, save_checkpoint, delete_checkpoint
@@ -151,13 +155,18 @@ class ProcessingPipeline:
         # Legacy params for backwards compatibility
         speaker_switching_enabled: bool = True,
         speaker_to_camera_map: Optional[dict[int, int]] = None,
+        timeline_boundary_config: Optional[TimelineBoundaryConfig] = None,
     ) -> None:
         if len(input_files) < 2:
             raise ValueError("At least 2 input files required")
         self.input_files = input_files
         self.signals = signals
         self.progress_callback = progress_callback
-
+        self.timeline_boundary_config = (
+            timeline_boundary_config
+            if timeline_boundary_config is not None
+            else TimelineBoundaryConfig()
+        )
         # Use config if provided, otherwise fall back to legacy params
         if config is not None:
             self._config = config

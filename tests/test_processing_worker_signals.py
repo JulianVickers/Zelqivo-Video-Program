@@ -1,74 +1,69 @@
 """Tests for ProcessingWorker signals."""
 
-import pytest
 from unittest.mock import MagicMock, patch
-from PySide6.QtCore import QObject
 
-from multicam_editor.logic.processing_worker import ProcessingWorker
+from multicam_editor.logic.audio_sources import (
+    AudioSource,
+    TimelineBoundaryConfig,
+    TimelineBoundaryPolicy,
+)
 from multicam_editor.logic.processing_pipeline import PipelineResult
+from multicam_editor.logic.processing_worker import ProcessingWorker
+
 
 class TestProcessingWorkerSignals:
     """Test signal emissions from ProcessingWorker."""
 
     def test_detection_stats_signal_emitted(self):
         """Worker should emit detection_stats when result contains them."""
-        # Setup
         worker = ProcessingWorker(
             input_files=["file1.mp4", "file2.mp4"],
-            speaker_switching_enabled=True
+            speaker_switching_enabled=True,
         )
-        
-        # Mock signals to verify emission
+
         mock_stats_slot = MagicMock()
         worker.detection_stats.connect(mock_stats_slot)
-        
-        # Mock the pipeline (which is created inside run())
-        with patch('multicam_editor.logic.processing_worker.ProcessingPipeline') as MockPipeline:
-            # Configure pipeline mock to return a result with stats
-            mock_pipeline_instance = MockPipeline.return_value
-            mock_pipeline_instance.run.return_value = PipelineResult(
+
+        with patch(
+            "multicam_editor.logic.processing_worker.ProcessingPipeline"
+        ) as mock_pipeline:
+            mock_pipeline.return_value.run.return_value = PipelineResult(
                 success=True,
                 output_path="out.mp4",
                 detection_time_s=42.5,
-                detection_model="Test Model"
+                detection_model="Test Model",
             )
-            
-            # Run worker
+
             worker.run()
-            
-            # Verify signal emission
-            mock_stats_slot.assert_called_once_with(42.5, "Test Model")
+
+        mock_stats_slot.assert_called_once_with(42.5, "Test Model")
 
     def test_detection_stats_signal_not_emitted_if_zero(self):
         """Worker should not emit detection_stats if time is 0."""
-        # Setup
         worker = ProcessingWorker(
             input_files=["file1.mp4", "file2.mp4"],
-            speaker_switching_enabled=True
+            speaker_switching_enabled=True,
         )
-        
-        # Mock signal
+
         mock_stats_slot = MagicMock()
         worker.detection_stats.connect(mock_stats_slot)
-        
-        # Mock pipeline result with no stats
-        with patch('multicam_editor.logic.processing_worker.ProcessingPipeline') as MockPipeline:
-            mock_pipeline_instance = MockPipeline.return_value
-            mock_pipeline_instance.run.return_value = PipelineResult(
+
+        with patch(
+            "multicam_editor.logic.processing_worker.ProcessingPipeline"
+        ) as mock_pipeline:
+            mock_pipeline.return_value.run.return_value = PipelineResult(
                 success=True,
                 output_path="out.mp4",
                 detection_time_s=0.0,
-                detection_model=""
+                detection_model="",
             )
-            
+
             worker.run()
-            
-            # Verify signal was NOT emitted
-            mock_stats_slot.assert_not_called()
+
+        mock_stats_slot.assert_not_called()
 
     def test_audio_sources_are_passed_to_pipeline(self):
-        from multicam_editor.logic.audio_sources import AudioSource
-
+        """Worker should forward configured audio sources to pipeline.run()."""
         source = AudioSource(
             source_id="mixer-channel-1",
             path="/recordings/mixer.wav",
@@ -80,7 +75,9 @@ class TestProcessingWorkerSignals:
             audio_sources=[source],
         )
 
-        with patch("multicam_editor.logic.processing_worker.ProcessingPipeline") as mock_pipeline:
+        with patch(
+            "multicam_editor.logic.processing_worker.ProcessingPipeline"
+        ) as mock_pipeline:
             mock_pipeline.return_value.run.return_value = PipelineResult(
                 success=True,
                 output_path="out.mp4",
@@ -93,3 +90,24 @@ class TestProcessingWorkerSignals:
             output_path=None,
             audio_sources=[source],
         )
+
+    def test_timeline_boundary_config_is_passed_to_pipeline(self):
+        """Worker should forward an explicit timeline policy to the pipeline."""
+        config = TimelineBoundaryConfig(
+            policy=TimelineBoundaryPolicy.PRESERVE_ALL_MEDIA
+        )
+        worker = ProcessingWorker(
+            input_files=["camera-a.mp4", "camera-b.mp4"],
+            timeline_boundary_config=config,
+        )
+
+        with patch(
+            "multicam_editor.logic.processing_worker.ProcessingPipeline"
+        ) as mock_pipeline:
+            mock_pipeline.return_value.run.return_value = PipelineResult(
+                success=True,
+                output_path="out.mp4",
+            )
+            worker.run()
+
+        assert mock_pipeline.call_args.kwargs["timeline_boundary_config"] == config

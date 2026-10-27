@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from ..utils.signals import ProcessingSignals
 from .processing_pipeline import ProcessingPipeline, PipelineProgress
 from .pipeline_config import PipelineConfig
-from .audio_sources import AudioSource
+from .audio_sources import AudioSource, TimelineBoundaryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class ProcessingWorker(QObject):
         speaker_switching_enabled: bool = True,
         camera_speaker_mapping: Optional[dict[int, str]] = None,
         audio_sources: Optional[List[AudioSource]] = None,
+        timeline_boundary_config: Optional[TimelineBoundaryConfig] = None,
     ) -> None:
         super().__init__()
         self.input_files = input_files
@@ -60,6 +61,11 @@ class ProcessingWorker(QObject):
         self.speaker_switching_enabled = speaker_switching_enabled
         self.camera_speaker_mapping = camera_speaker_mapping or {}
         self.audio_sources = list(audio_sources) if audio_sources is not None else None
+        self.timeline_boundary_config = (
+            timeline_boundary_config
+            if timeline_boundary_config is not None
+            else TimelineBoundaryConfig()
+        )
         self._pipeline: Optional[ProcessingPipeline] = None
 
     def cancel(self) -> None:
@@ -102,6 +108,7 @@ class ProcessingWorker(QObject):
                 signals,
                 progress_callback=self._on_progress_callback,
                 config=config,
+                timeline_boundary_config=self.timeline_boundary_config,
             )
             result = self._pipeline.run(
                 external_audio=self.external_audio,
@@ -166,6 +173,7 @@ class ProcessingThread(QThread):
         camera_speaker_mapping: Optional[dict[int, str]] = None,
         parent: Optional[QObject] = None,
         audio_sources: Optional[List[AudioSource]] = None,
+        timeline_boundary_config: Optional[TimelineBoundaryConfig] = None,
     ) -> None:
         super().__init__(parent)
         self.input_files = input_files
@@ -175,6 +183,11 @@ class ProcessingThread(QThread):
         self.speaker_switching_enabled = speaker_switching_enabled
         self.camera_speaker_mapping = camera_speaker_mapping or {}
         self.audio_sources = list(audio_sources) if audio_sources is not None else None
+        self.timeline_boundary_config = (
+            timeline_boundary_config
+            if timeline_boundary_config is not None
+            else TimelineBoundaryConfig()
+        )
         self._worker: Optional[ProcessingWorker] = None
 
     def cancel(self) -> None:
@@ -192,6 +205,7 @@ class ProcessingThread(QThread):
             self.speaker_switching_enabled,
             self.camera_speaker_mapping,
             audio_sources=self.audio_sources,
+            timeline_boundary_config=self.timeline_boundary_config,
         )
 
         # Connect worker signals to thread signals
