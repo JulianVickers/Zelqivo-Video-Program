@@ -206,6 +206,10 @@ class ProcessingPipeline:
 
         # Camera alignment offsets (camera_idx -> offset_ms)
         self._camera_offsets: dict[int, float] = {}
+        # Per-run external audio configuration and synchronization results.
+        self._audio_sources: List[AudioSource] = []
+        self._external_audio_path: Optional[str] = None
+        self._audio_source_alignments: dict = {}
         
         # Detection stats for UI display
         self._detection_time_s: float = 0.0
@@ -447,7 +451,8 @@ class ProcessingPipeline:
         if self._audio_sources:
             logger.info(
                 "Received %d configured external audio source(s); "
-                "multi-source processing is not yet enabled",
+                "independent synchronization is enabled; downstream "
+                "detection and output integration are still pending",
                 len(self._audio_sources),
             )
 
@@ -612,6 +617,7 @@ class ProcessingPipeline:
 
         self._camera_offsets = {0: 0.0}  # Primary always 0
         self._external_audio_offset = 0.0  # Default for external audio
+        self._audio_source_alignments = {}  # Clear results from any prior run
 
         if len(self.input_files) < 2 and not self._external_audio_path:
             self._emit_progress(100, "Skipping alignment (single camera, no external audio)")
@@ -661,61 +667,165 @@ class ProcessingPipeline:
                     for i in range(len(self.input_files))
                 ])
         
-        # Step 2: Align external audio to primary camera (if provided)
-        if self._external_audio_path:
-            self._emit_progress(90, "Aligning external audio to primary camera...")
-            
+        # Step 2: Align external audio sources to the primary camera.
+        # The legacy single-source path remains supported.
+        if self._external_audio_path or self._audio_sources:
+            from ..utils.ffmpeg import extract_audio_to_wav
+            from .audio_source_sync import (
+                AudioSourceAlignment,
+                align_audio_sources,
+            )
+
+            self._emit_progress(90, "Preparing primary camera audio for synchronization...")
+
+            primary_wav_result = None
+
             try:
-                # Extract audio from primary camera
-                from ..utils.ffmpeg import extract_audio_to_wav
-                
-                primary_wav_result = extract_audio_to_wav(self.input_files[0], sample_rate=16000, mono=True)
-                if not primary_wav_result.success or not primary_wav_result.output_path:
-                    logger.warning("Failed to extract primary audio for external sync: %s", primary_wav_result.error)
-                    self._external_audio_offset = 0.0
-                else:
-                    # Align external audio to primary
-                    offset_ms, status = align_audio_offset(self._external_audio_path, primary_wav_result.output_path)
-                    
-                    if status == "ok":
-                        self._external_audio_offset = offset_ms
-                        logger.info("External audio aligned: offset=%.1f ms", offset_ms)
-                        
-                        # Add to QA artifacts
-                        self._qa_exporter.set_external_audio_alignment({
-                            "external_audio_path": self._external_audio_path,
-                            "offset_ms": offset_ms,
-                            "status": "ok"
-                        })
-                    else:
-                        logger.warning("External audio alignment failed (%s), using offset=0", status)
+                primary_wav_result = extract_audio_to_wav(
+                    self.input_files[0],
+                    sample_rate=16000,
+                    mono=True,
+                )
+
+                if (
+                    not primary_wav_result.success
+                    or not primary_wav_result.output_path
+                ):
+                    error_message = (
+                        primary_wav_result.error
+                        or "Failed to extract primary camera audio"
+                    )
+                    logger.warning(
+                        "Could not extract primary camera audio for synchronization: %s",
+                        error_message,
+                    )
+
+                    if self._external_audio_path:
                         self._external_audio_offset = 0.0
-                        
                         self._qa_exporter.set_external_audio_alignment({
                             "external_audio_path": self._external_audio_path,
                             "offset_ms": 0.0,
                             "status": "failed",
-                            "message": status
+                            "message": error_message,
                         })
-                    
-                    # Cleanup temp WAV
-                    import os
-                    if primary_wav_result.output_path and os.path.isfile(primary_wav_result.output_path):
-                        try:
-                            os.remove(primary_wav_result.output_path)
-                        except Exception as cleanup_err:
-                            logger.debug("Failed to cleanup primary WAV: %s", cleanup_err)
-                            
+
+                    for source in self._audio_sources:
+                        self._audio_source_alignments[source.source_id] = (
+                            AudioSourceAlignment(
+                                source_id=source.source_id,
+                                path=source.path,
+                                channel_index=source.channel_index,
+                                offset_ms=0.0,
+                                status="failed",
+                                message=error_message,
+                            )
+                        )
+
+                else:
+                    reference_wav = primary_wav_result.output_path
+
+                    # Legacy single external-audio source.
+                    if self._external_audio_path:
+                        offset_ms, status = align_audio_offset(
+                            self._external_audio_path,
+                            reference_wav,
+                        )
+
+                        if status == "ok":
+                            self._external_audio_offset = offset_ms
+                            logger.info(
+                                "External audio aligned: offset=%.1f ms",
+                                offset_ms,
+                            )
+
+                            self._qa_exporter.set_external_audio_alignment({
+                                "external_audio_path": self._external_audio_path,
+                                "offset_ms": offset_ms,
+                                "status": "ok",
+                            })
+                        else:
+                            self._external_audio_offset = 0.0
+                            logger.warning(
+                                "External audio alignment failed (%s), using offset=0",
+                                status,
+                            )
+
+                            self._qa_exporter.set_external_audio_alignment({
+                                "external_audio_path": self._external_audio_path,
+                                "offset_ms": 0.0,
+                                "status": "failed",
+                                "message": status,
+                            })
+
+                    # Independently configured external audio sources.
+                    if self._audio_sources:
+                        self._emit_progress(
+                            92,
+                            f"Aligning {len(self._audio_sources)} external audio source(s)...",
+                        )
+
+                        self._audio_source_alignments = align_audio_sources(
+                            self._audio_sources,
+                            reference_wav,
+                        )
+
+                        for source_id, alignment in self._audio_source_alignments.items():
+                            if alignment.status == "ok":
+                                logger.info(
+                                    "Configured audio source %s aligned: "
+                                    "offset=%.1f ms",
+                                    source_id,
+                                    alignment.offset_ms,
+                                )
+                            else:
+                                logger.warning(
+                                    "Configured audio source %s alignment failed: %s",
+                                    source_id,
+                                    alignment.message,
+                                )
+
             except Exception as e:
-                logger.error("External audio alignment failed: %s", e, exc_info=True)
-                self._external_audio_offset = 0.0
-                
-                self._qa_exporter.set_external_audio_alignment({
-                    "external_audio_path": self._external_audio_path,
-                    "offset_ms": 0.0,
-                    "status": "error",
-                    "message": str(e)
-                })
+                logger.error(
+                    "External audio synchronization failed: %s",
+                    e,
+                    exc_info=True,
+                )
+
+                if self._external_audio_path:
+                    self._external_audio_offset = 0.0
+                    self._qa_exporter.set_external_audio_alignment({
+                        "external_audio_path": self._external_audio_path,
+                        "offset_ms": 0.0,
+                        "status": "error",
+                        "message": str(e),
+                    })
+
+                for source in self._audio_sources:
+                    self._audio_source_alignments[source.source_id] = (
+                        AudioSourceAlignment(
+                            source_id=source.source_id,
+                            path=source.path,
+                            channel_index=source.channel_index,
+                            offset_ms=0.0,
+                            status="failed",
+                            message=str(e),
+                        )
+                    )
+
+            finally:
+                # Always remove the temporary primary-camera reference WAV.
+                if (
+                    primary_wav_result
+                    and primary_wav_result.output_path
+                    and os.path.isfile(primary_wav_result.output_path)
+                ):
+                    try:
+                        os.remove(primary_wav_result.output_path)
+                    except OSError as cleanup_err:
+                        logger.warning(
+                            "Failed to cleanup primary WAV: %s",
+                            cleanup_err,
+                        )
         
         self._emit_progress(100, "Alignment complete")
 

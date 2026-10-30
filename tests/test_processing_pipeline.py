@@ -1,5 +1,8 @@
 """Tests for the processing pipeline orchestrator."""
+from types import SimpleNamespace
 
+from multicam_editor.logic.audio_sources import AudioSource
+from multicam_editor.logic.audio_source_sync import AudioSourceAlignment
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +19,76 @@ from multicam_editor.utils.signals import ProcessingSignals
 # processing_pipeline.py uses a local import: from .preflight import PreflightManager
 _PREFLIGHT_PATCH = 'multicam_editor.logic.preflight.PreflightManager'
 
+def test_stage_align_synchronizes_configured_audio_sources(
+
+    monkeypatch,
+    tmp_path,
+):
+    """Configured sources are aligned against the primary camera WAV."""
+    reference_wav = tmp_path / "primary.wav"
+    reference_wav.write_bytes(b"reference audio")
+
+    source = AudioSource(
+        source_id="travis",
+        path="/recordings/travis.wav",
+        channel_index=1,
+    )
+
+    expected_alignment = AudioSourceAlignment(
+        source_id="travis",
+        path=source.path,
+        channel_index=1,
+        offset_ms=125.0,
+        status="ok",
+        message="ok",
+    )
+
+    signals = ProcessingSignals()
+    pipeline = ProcessingPipeline(
+        ["camera1.mp4", "camera2.mp4"],
+        signals,
+    )
+    pipeline._audio_sources = [source]
+
+    monkeypatch.setattr(
+        "multicam_editor.logic.audio_sync.align_cameras",
+        lambda *args, **kwargs: [],
+    )
+
+    extraction_calls = []
+
+    def fake_extract(*args, **kwargs):
+        extraction_calls.append((args, kwargs))
+        return SimpleNamespace(
+            success=True,
+            output_path=str(reference_wav),
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        "multicam_editor.utils.ffmpeg.extract_audio_to_wav",
+        fake_extract,
+    )
+
+    alignment_calls = []
+
+    def fake_align(sources, reference_path):
+        alignment_calls.append((sources, reference_path))
+        return {"travis": expected_alignment}
+
+    monkeypatch.setattr(
+        "multicam_editor.logic.audio_source_sync.align_audio_sources",
+        fake_align,
+    )
+
+    pipeline._stage_align()
+
+    assert len(extraction_calls) == 1
+    assert alignment_calls == [([source], str(reference_wav))]
+    assert pipeline._audio_source_alignments == {
+        "travis": expected_alignment,
+    }
+    assert not reference_wav.exists()
 
 def _mock_preflight_pass(mock_cls):
     """Configure a mock PreflightManager to always pass."""
