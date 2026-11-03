@@ -683,14 +683,11 @@ class ProcessingPipeline:
                     for i in range(len(self.input_files))
                 ])
         
-        # Step 2: Align external audio sources to the primary camera.
-        # The legacy single-source path remains supported.
-        if self._external_audio_path or self._audio_sources:
+        # Step 2: Align the legacy external audio to the primary camera.
+        # Configured audio sources never reach this point: _align_to_session
+        # places them on the session timeline and returns early.
+        if self._external_audio_path:
             from ..utils.ffmpeg import extract_audio_to_wav
-            from .audio_source_sync import (
-                AudioSourceAlignment,
-                align_audio_sources,
-            )
 
             self._emit_progress(90, "Preparing primary camera audio for synchronization...")
 
@@ -724,18 +721,6 @@ class ProcessingPipeline:
                             "status": "failed",
                             "message": error_message,
                         })
-
-                    for source in self._audio_sources:
-                        self._audio_source_alignments[source.source_id] = (
-                            AudioSourceAlignment(
-                                source_id=source.source_id,
-                                path=source.path,
-                                channel_index=source.channel_index,
-                                offset_ms=0.0,
-                                status="failed",
-                                message=error_message,
-                            )
-                        )
 
                 else:
                     reference_wav = primary_wav_result.output_path
@@ -773,33 +758,6 @@ class ProcessingPipeline:
                                 "message": status,
                             })
 
-                    # Independently configured external audio sources.
-                    if self._audio_sources:
-                        self._emit_progress(
-                            92,
-                            f"Aligning {len(self._audio_sources)} external audio source(s)...",
-                        )
-
-                        self._audio_source_alignments = align_audio_sources(
-                            self._audio_sources,
-                            reference_wav,
-                        )
-
-                        for source_id, alignment in self._audio_source_alignments.items():
-                            if alignment.status == "ok":
-                                logger.info(
-                                    "Configured audio source %s aligned: "
-                                    "offset=%.1f ms",
-                                    source_id,
-                                    alignment.offset_ms,
-                                )
-                            else:
-                                logger.warning(
-                                    "Configured audio source %s alignment failed: %s",
-                                    source_id,
-                                    alignment.message,
-                                )
-
             except Exception as e:
                 logger.error(
                     "External audio synchronization failed: %s",
@@ -815,18 +773,6 @@ class ProcessingPipeline:
                         "status": "error",
                         "message": str(e),
                     })
-
-                for source in self._audio_sources:
-                    self._audio_source_alignments[source.source_id] = (
-                        AudioSourceAlignment(
-                            source_id=source.source_id,
-                            path=source.path,
-                            channel_index=source.channel_index,
-                            offset_ms=0.0,
-                            status="failed",
-                            message=str(e),
-                        )
-                    )
 
             finally:
                 # Always remove the temporary primary-camera reference WAV.
