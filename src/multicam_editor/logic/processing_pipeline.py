@@ -1581,6 +1581,18 @@ class ProcessingPipeline:
 
         self._emit_progress(30, "Finalizing video...")
 
+        # Session mode: the mixer session is the audio for the whole timeline.
+        # No fallback to camera audio, which would be the wrong audio at the wrong time.
+        if self._audio_sources:
+            self._emit_progress(50, "Adding session audio mix...")
+            final_path = self._add_session_audio(input_video, output_path)
+            self._cleanup()
+            if final_path:
+                self._emit_progress(100, "Session audio added successfully")
+                logger.info("Final output with session audio: %s", final_path)
+                return final_path
+            return None
+
         # Priority 1: Check for external audio (aligned in _stage_align)
         if self._external_audio_path and os.path.isfile(self._external_audio_path):
             # Add external audio with offset
@@ -1759,6 +1771,83 @@ class ProcessingPipeline:
         except Exception as e:
             logger.error("Audio replacement error: %s", e, exc_info=True)
             return None
+
+    def _build_session_mix_args(self, video_path: str, output_path: str) -> List[str]:
+        """ffmpeg command muxing the session mix under the rendered video.
+
+        Every source with include_in_output is summed (amix, no normalisation,
+        since these are individual mics) at offset 0, honouring channel_index
+        and gain_db. The video is copied and never truncated (no -shortest);
+        audio runs as long as the longest source.
+        """
+        sources = [src for src in self._audio_sources if src.include_in_output]
+        if not sources:
+            raise ValueError("No audio source has include_in_output set; nothing to mux")
+
+        args: List[str] = ["ffmpeg", "-y", "-i", video_path]
+        for src in sources:
+            args.extend(["-i", src.path])
+
+        chains: List[str] = []
+        labels: List[str] = []
+        for n, src in enumerate(sources):
+            filters: List[str] = []
+            if src.channel_index is not None:
+                filters.append(f"pan=mono|c0=c{src.channel_index}")
+            if src.gain_db != 0.0:
+                filters.append(f"volume={src.gain_db:g}dB")
+            label = "aout" if len(sources) == 1 else f"s{n}"
+            chains.append(f"[{n + 1}:a:0]{','.join(filters) or 'anull'}[{label}]")
+            labels.append(label)
+        if len(sources) > 1:
+            joined = "".join(f"[{label}]" for label in labels)
+            chains.append(
+                f"{joined}amix=inputs={len(sources)}:duration=longest:normalize=0[aout]"
+            )
+
+        args.extend([
+            "-filter_complex", ";".join(chains),
+            "-map", "0:v:0",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            output_path,
+        ])
+        return args
+
+    def _add_session_audio(self, video_path: str, output_path: str) -> Optional[str]:
+        """Mux the session mix under the video. Reports errors; no fallback audio."""
+        from ..utils.ffmpeg import FFmpegProcess, is_ffmpeg_available
+
+        try:
+            args = self._build_session_mix_args(video_path, output_path)
+        except ValueError as e:
+            logger.error("Session audio: %s", e)
+            self.signals.error.emit(str(e))
+            return None
+
+        if not is_ffmpeg_available():
+            msg = "ffmpeg not available for muxing the session audio"
+            logger.error(msg)
+            self.signals.error.emit(msg)
+            return None
+
+        try:
+            result = FFmpegProcess(args, output_path).run()
+        except Exception as e:
+            msg = f"Session audio mux error: {e}"
+            logger.error(msg, exc_info=True)
+            self.signals.error.emit(msg)
+            return None
+
+        if result.success:
+            logger.info("Session audio mux successful: %s", output_path)
+            return output_path
+
+        msg = f"Session audio mux failed: {result.error}"
+        logger.error(msg)
+        self.signals.error.emit(msg)
+        return None
 
     def _add_external_audio_with_offset(
         self, video_path: str, audio_path: str, output_path: str, offset_ms: float
