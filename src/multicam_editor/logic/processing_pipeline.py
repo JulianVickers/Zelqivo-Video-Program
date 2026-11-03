@@ -212,6 +212,8 @@ class ProcessingPipeline:
         self._audio_source_alignments: dict = {}
         # Camera placement on the mixer-session timeline (None unless sources are configured).
         self._session_placement = None
+        # Black-aware segments for the render stage (None on the legacy path).
+        self._timeline_segments = None
         
         # Detection stats for UI display
         self._detection_time_s: float = 0.0
@@ -629,6 +631,7 @@ class ProcessingPipeline:
         self._external_audio_offset = 0.0  # Default for external audio
         self._audio_source_alignments = {}  # Clear results from any prior run
         self._session_placement = None
+        self._timeline_segments = None
 
         if self._audio_sources:
             # Sources define the session timeline. The legacy first-30-seconds
@@ -934,7 +937,7 @@ class ProcessingPipeline:
                 self._emit_progress(50, "Initializing visual detection...")
                 
                 # Calculate duration from probe results
-                duration_ms = max(r.duration_ms for r in self._probe_results)
+                duration_ms = self._timeline_duration_ms()
                 
                 self._speaker_segments = engine.detect_speakers(
                     video_paths=self.input_files,
@@ -995,7 +998,7 @@ class ProcessingPipeline:
                     self._temp_files.append(audio_path)
                     
                     # Calculate duration from probe results
-                    duration_ms = max(r.duration_ms for r in self._probe_results)
+                    duration_ms = self._timeline_duration_ms()
                     
                     self._speaker_segments = engine.detect_speakers(
                         video_paths=self.input_files,
@@ -1145,6 +1148,126 @@ class ProcessingPipeline:
         logger.info("Applied speaker-to-camera mapping: %d segments mapped", len(mapped))
         return mapped, False
 
+    def _timeline_duration_ms(self) -> int:
+        """Timeline length: the session when placed on one, else the longest camera."""
+        if self._session_placement is not None:
+            return self._session_placement.session_duration_ms
+        return max(r.duration_ms for r in self._probe_results)
+
+    def _repair_to_session_coverage(self) -> bool:
+        """Fit the cut plan to what each camera actually recorded (session mode)."""
+        from .timeline_ruler import (
+            build_camera_coverage,
+            build_timeline_segments,
+            repair_cut_plan,
+        )
+
+        placement = self._session_placement
+        try:
+            coverage = build_camera_coverage(
+                [cam.session_offset_ms for cam in placement.cameras],
+                [r.duration_ms for r in self._probe_results],
+            )
+            repaired = repair_cut_plan(self._cut_plan, coverage)
+        except ValueError as e:
+            msg = f"Cannot fit cuts to camera footage: {e}"
+            logger.error(msg)
+            self.signals.error.emit(msg)
+            return False
+
+        segments = build_timeline_segments(repaired.cuts, repaired.uncovered)
+        if not segments or all(seg.camera_id is None for seg in segments):
+            msg = "No camera has any footage on the session timeline; nothing to render"
+            logger.error(msg)
+            self.signals.error.emit(msg)
+            return False
+
+        for sub in repaired.substitutions:
+            logger.warning(
+                "Substituting camera %d for camera %d at %d-%d ms (no footage from camera %d)",
+                sub.used_camera, sub.wanted_camera, sub.start_ms, sub.end_ms, sub.wanted_camera,
+            )
+        for start_ms, end_ms in repaired.uncovered:
+            logger.warning(
+                "No footage from any camera at %d-%d ms; rendering black", start_ms, end_ms
+            )
+
+        self._cut_plan = list(repaired.cuts)
+        self._timeline_segments = segments
+        return True
+
+    def _record_segment_cuts(self) -> None:
+        """QA entries for session mode; black stretches are camera_index=-1."""
+        for seg in self._timeline_segments:
+            if seg.camera_id is None:
+                self._qa_exporter.add_cut(
+                    start_ms=seg.start_ms,
+                    end_ms=seg.end_ms,
+                    camera_index=-1,
+                    speaker_id=-1,
+                    reason="no_footage",
+                )
+                continue
+            if seg.start_ms == 0:
+                reason = "default"
+            elif any(
+                s.start_ms == seg.start_ms and s.speaker_id == seg.camera_id
+                for s in self._speaker_segments
+            ):
+                reason = "threshold"
+            else:
+                reason = "forced"
+            self._qa_exporter.add_cut(
+                start_ms=seg.start_ms,
+                end_ms=seg.end_ms,
+                camera_index=min(seg.camera_id, len(self.input_files) - 1),
+                speaker_id=seg.camera_id,
+                reason=reason,
+            )
+
+    def _build_session_cuts(self) -> Optional[List[CutDefinition]]:
+        """CutDefinitions for session mode. A real segment outside its camera's
+        footage is an error (2 ms tolerance for int() truncation), never a sliver."""
+        tolerance_ms = 2
+        cuts: List[CutDefinition] = []
+        for i, seg in enumerate(self._timeline_segments):
+            if seg.camera_id is None:
+                cuts.append(CutDefinition(
+                    source_path="", start_ms=seg.start_ms, end_ms=seg.end_ms,
+                    cut_index=i, black=True,
+                ))
+                continue
+            camera_idx = min(seg.camera_id, len(self.input_files) - 1)
+            offset_ms = self._camera_offsets.get(camera_idx, 0.0)
+            start = int(seg.start_ms + offset_ms)
+            end = int(seg.end_ms + offset_ms)
+            duration = (
+                self._probe_results[camera_idx].duration_ms
+                if camera_idx < len(self._probe_results) else 0
+            )
+            if start < -tolerance_ms or (duration > 0 and end > duration + tolerance_ms) or end <= max(start, 0):
+                msg = (
+                    f"Camera {camera_idx} has no footage for show time "
+                    f"{seg.start_ms}-{seg.end_ms} ms (needs camera time {start}-{end} ms, "
+                    f"camera length {duration} ms); cannot render"
+                )
+                logger.error(msg)
+                self.signals.error.emit(msg)
+                return None
+            start = max(0, start)
+            if duration > 0:
+                end = min(end, duration)
+            cuts.append(CutDefinition(
+                source_path=self.input_files[camera_idx],
+                start_ms=start,
+                end_ms=end,
+                cut_index=i,
+                camera_index=camera_idx,
+                qa_overlay=False,
+                speaker_id=seg.camera_id,
+            ))
+        return cuts
+
     def _stage_decision(self) -> bool:
         """Generate cut plan from speaker segments.
 
@@ -1154,7 +1277,7 @@ class ProcessingPipeline:
         self._advance_stage(PipelineStage.DECISION)
 
         # Get total duration from probe results
-        total_duration_ms = max(r.duration_ms for r in self._probe_results)
+        total_duration_ms = self._timeline_duration_ms()
 
         self._emit_progress(50, "Generating cut plan...")
 
@@ -1191,6 +1314,12 @@ class ProcessingPipeline:
         # Merge adjacent cuts with same camera
         self._cut_plan = engine.merge_adjacent(self._cut_plan)
 
+        # Session mode: fit cuts to camera coverage, black where nothing was recorded
+        self._timeline_segments = None
+        if self._session_placement is not None:
+            if not self._repair_to_session_coverage():
+                return False
+
         # Record QA artifacts
         self._qa_exporter.set_thresholds(
             min_switch_interval_ms=min_switch_interval_ms,
@@ -1205,7 +1334,11 @@ class ProcessingPipeline:
         # Build a speaker segment lookup for determining cut reasons
         segment_speakers = {(s.start_ms, s.end_ms): s.speaker_id for s in self._speaker_segments}
 
-        for cut in self._cut_plan:
+        if self._timeline_segments is not None:
+            self._record_segment_cuts()
+        legacy_cuts = [] if self._timeline_segments is not None else self._cut_plan
+
+        for cut in legacy_cuts:
             # Determine reason based on decision logic
             camera_idx = min(cut.camera_id, len(self.input_files) - 1)
             # Find speaker that triggered this cut (heuristic: speaker at cut start)
@@ -1320,14 +1453,21 @@ class ProcessingPipeline:
         """
         self._advance_stage(PipelineStage.RENDER)
 
-        if not self._cut_plan:
+        session_cuts: Optional[List[CutDefinition]] = None
+        if self._timeline_segments is not None:
+            session_cuts = self._build_session_cuts()
+            if session_cuts is None:
+                return None
+        elif not self._cut_plan:
             logger.warning("No cuts to render")
             self._emit_progress(100, "No cuts to render")
             return []
 
         # Check disk space before starting render
         try:
-            self._check_disk_space(num_segments=len(self._cut_plan))
+            self._check_disk_space(
+                num_segments=len(session_cuts) if session_cuts is not None else len(self._cut_plan)
+            )
         except RuntimeError as e:
             logger.error("Disk space check failed: %s", e)
             self.signals.error.emit(str(e))
@@ -1344,7 +1484,7 @@ class ProcessingPipeline:
 
         # Convert CutSegments to CutDefinitions with camera offset applied
         cuts: List[CutDefinition] = []
-        for i, cut in enumerate(self._cut_plan):
+        for i, cut in enumerate([] if session_cuts is not None else self._cut_plan):
             # camera_id maps to input file index
             camera_idx = min(cut.camera_id, len(self.input_files) - 1)
 
@@ -1378,6 +1518,9 @@ class ProcessingPipeline:
                 qa_overlay=False,  # Not supported in single-pass mode
                 speaker_id=cut.camera_id,
             ))
+
+        if session_cuts is not None:
+            cuts = session_cuts
 
         # Generate temp output path for single-pass render
         temp_video_path = tempfile.mktemp(prefix="multicam_singlepass_", suffix=".mp4")
