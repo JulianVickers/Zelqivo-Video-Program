@@ -44,6 +44,10 @@ class CutDefinition:
         qa_overlay: Enable QA overlay burn-in
         speaker_id: Active speaker ID for overlay
         camera_index: Active camera index for overlay
+
+    Black segments:
+        black: Render black frames for this span instead of footage;
+            source_path is not used
     """
 
     source_path: str
@@ -59,6 +63,8 @@ class CutDefinition:
     qa_overlay: bool = False
     speaker_id: int = 0
     camera_index: int = 0
+    # Black segments (span with no footage); source_path is ignored.
+    black: bool = False
 
 
 @dataclass
@@ -505,6 +511,8 @@ def render_single_pass(
 
     # Validate all source files exist
     for i, cut in enumerate(cuts):
+        if cut.black:
+            continue
         if not os.path.isfile(cut.source_path):
             logger.error("Source file not found for cut %d: %s", i, cut.source_path)
             return RenderResult(

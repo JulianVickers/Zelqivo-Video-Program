@@ -852,6 +852,8 @@ def build_single_pass_filter_complex_args(
             - start_ms: int - start time in milliseconds
             - end_ms: int - end time in milliseconds
             - camera_index: int (optional) - for logging
+            - black: bool (optional) - render black frames of the span's
+              duration instead of footage; source_path is ignored
         output_path: Destination path for output video
         resolution: Target resolution ("1080p" or "720p")
         fps: Target frame rate (default 30.0)
@@ -865,6 +867,11 @@ def build_single_pass_filter_complex_args(
         logger.warning("build_single_pass_filter_complex_args: no cuts provided")
         return [], None
 
+    def is_black(cut) -> bool:
+        if hasattr(cut, 'source_path'):
+            return bool(getattr(cut, 'black', False))
+        return bool(cut.get('black', False))
+
     # Determine output dimensions based on resolution
     if resolution == "720p":
         out_width, out_height = 1280, 720
@@ -874,6 +881,8 @@ def build_single_pass_filter_complex_args(
     # Build unique input list - map source paths to input indices
     unique_sources: dict[str, int] = {}
     for cut in cuts:
+        if is_black(cut):
+            continue  # generated inside the graph; opens no input
         source_path = cut.source_path if hasattr(cut, 'source_path') else cut.get('source_path', '')
         if source_path and source_path not in unique_sources:
             unique_sources[source_path] = len(unique_sources)
@@ -914,6 +923,19 @@ def build_single_pass_filter_complex_args(
             "Single-pass segment %d: camera=%d, source=%s, start=%.3fs, end=%.3fs (duration=%.3fs)",
             i, camera_idx, Path(source_path).name, start_sec, end_sec, duration_sec
         )
+
+        if is_black(cut):
+            # Same size, fps and tail as real segments so concat sees
+            # uniform streams.
+            black_label = f"v{i}"
+            filter_parts.append(
+                f"color=c=black:s={out_width}x{out_height}:r={fps}:d={duration_sec:.3f},"
+                f"setsar=1,"
+                f"fps={fps}"
+                f"[{black_label}]"
+            )
+            segment_labels.append(f"[{black_label}]")
+            continue
 
         # Build filter chain for this segment:
         # 1. trim: extract time range

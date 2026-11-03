@@ -170,3 +170,62 @@ def repair_cut_plan(
         substitutions=tuple(subs),
         uncovered=tuple(gaps),
     )
+
+
+@dataclass(frozen=True)
+class TimelineSegment:
+    """One stretch of show time to render; ``camera_id`` None means black."""
+
+    start_ms: int
+    end_ms: int
+    camera_id: int | None
+
+
+def build_timeline_segments(
+    cuts: Sequence[CutSegment],
+    uncovered: Sequence[tuple[int, int]],
+) -> tuple[TimelineSegment, ...]:
+    """Subtract no-footage ranges from repaired cuts.
+
+    ``repair_cut_plan`` keeps an uncovered stretch on its wanted camera and
+    merges it into a same-camera neighbour, so the black stretches are only
+    visible in ``uncovered``. This splits the cuts around them again.
+    Contiguous segments that are identical (same camera, or both black) are
+    merged, and the total span is preserved.
+    """
+    gaps: list[tuple[int, int]] = []
+    for lo, hi in sorted((int(a), int(b)) for a, b in uncovered):
+        if hi <= lo:
+            continue
+        if gaps and lo <= gaps[-1][1]:
+            gaps[-1] = (gaps[-1][0], max(gaps[-1][1], hi))
+        else:
+            gaps.append((lo, hi))
+
+    pieces: list[tuple[int, int, int | None]] = []
+    for cut in cuts:
+        start, end = int(cut.start_ms), int(cut.end_ms)
+        if end <= start:
+            continue
+        cursor = start
+        for lo, hi in gaps:
+            if hi <= cursor:
+                continue
+            if lo >= end:
+                break
+            if lo > cursor:
+                pieces.append((cursor, lo, cut.camera_id))
+            black_end = min(hi, end)
+            pieces.append((max(lo, cursor), black_end, None))
+            cursor = black_end
+        if cursor < end:
+            pieces.append((cursor, end, cut.camera_id))
+
+    merged: list[tuple[int, int, int | None]] = []
+    for x, y, camera in pieces:
+        if merged and merged[-1][2] == camera and merged[-1][1] == x:
+            merged[-1] = (merged[-1][0], y, camera)
+        else:
+            merged.append((x, y, camera))
+
+    return tuple(TimelineSegment(x, y, camera) for x, y, camera in merged)
