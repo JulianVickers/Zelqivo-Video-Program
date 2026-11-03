@@ -210,6 +210,8 @@ class ProcessingPipeline:
         self._audio_sources: List[AudioSource] = []
         self._external_audio_path: Optional[str] = None
         self._audio_source_alignments: dict = {}
+        # Camera placement on the mixer-session timeline (None unless sources are configured).
+        self._session_placement = None
         
         # Detection stats for UI display
         self._detection_time_s: float = 0.0
@@ -503,7 +505,9 @@ class ProcessingPipeline:
                 return PipelineResult(success=False, cancelled=True)
 
             # Stage 2: Align cameras (auto-sync by audio)
-            self._stage_align()
+            if not self._stage_align():
+                return PipelineResult(success=False, cancelled=self._cancelled,
+                                     error="Alignment stage failed")
             self._save_checkpoint("ALIGN")
 
             if self._check_cancelled():
@@ -604,12 +608,18 @@ class ProcessingPipeline:
         logger.info("Probed %d files", len(self._probe_results))
         return True
 
-    def _stage_align(self) -> None:
+    def _stage_align(self) -> bool:
         """Align cameras using audio cross-correlation.
 
         First camera is primary (offset=0). Others aligned relative to it.
         If external_audio is provided, it's also aligned to primary camera.
-        Never fails the pipeline - on error, all offsets default to 0.
+        Never fails the pipeline on the legacy path - on error, all offsets
+        default to 0.
+
+        With configured audio sources the sources form one session and every
+        camera is placed on that timeline instead (_align_to_session). That
+        path returns False, after emitting the error, when a camera or source
+        cannot be placed. Returns True otherwise.
         """
         self._advance_stage(PipelineStage.ALIGN)
 
@@ -618,10 +628,16 @@ class ProcessingPipeline:
         self._camera_offsets = {0: 0.0}  # Primary always 0
         self._external_audio_offset = 0.0  # Default for external audio
         self._audio_source_alignments = {}  # Clear results from any prior run
+        self._session_placement = None
+
+        if self._audio_sources:
+            # Sources define the session timeline. The legacy first-30-seconds
+            # correlation cannot align hand-started cameras.
+            return self._align_to_session()
 
         if len(self.input_files) < 2 and not self._external_audio_path:
             self._emit_progress(100, "Skipping alignment (single camera, no external audio)")
-            return
+            return True
 
         # Step 1: Align cameras to each other
         if len(self.input_files) >= 2:
@@ -828,6 +844,89 @@ class ProcessingPipeline:
                         )
         
         self._emit_progress(100, "Alignment complete")
+        return True
+
+    def _align_to_session(self) -> bool:
+        """Place every camera on the mixer-session timeline.
+
+        Configured audio sources form one session; its start is show time
+        zero. Fills ``_camera_offsets`` (render-slot convention: the negated
+        session offset), ``_session_placement`` and the per-source alignments.
+        Returns False, after emitting the error, when a source cannot be
+        decoded or a camera cannot be placed.
+        """
+        from .audio_source_sync import AudioSourceAlignment
+        from .session_placement import (
+            SessionPlacementError,
+            place_cameras_on_session,
+        )
+
+        self._emit_progress(5, "Placing cameras on the session timeline...")
+
+        try:
+            placement = place_cameras_on_session(
+                self.input_files,
+                [source.path for source in self._audio_sources],
+            )
+        except SessionPlacementError as exc:
+            logger.error("Session placement failed: %s", exc)
+            self.signals.error.emit(str(exc))
+            return False
+
+        for warning in placement.warnings:
+            logger.warning("Session placement: %s", warning)
+
+        # Written before a failure stops the stage, so the QA artifacts
+        # explain the stop.
+        self._qa_exporter.set_camera_alignments([
+            {
+                "camera_index": cam.camera_index,
+                "offset_ms": cam.slot_offset_ms,
+                "session_offset_ms": cam.session_offset_ms,
+                "status": cam.status,
+                "peak": cam.peak,
+                "peak_ratio": cam.peak_ratio,
+                "refined": cam.refined,
+                "refine_shift_ms": cam.refine_shift_ms,
+                "message": cam.message,
+            }
+            for cam in placement.cameras
+        ])
+
+        try:
+            placement.require_all_placed()
+        except SessionPlacementError as exc:
+            logger.error("Session placement failed: %s", exc)
+            self.signals.error.emit(str(exc))
+            return False
+
+        self._session_placement = placement
+        self._camera_offsets = {
+            cam.camera_index: cam.slot_offset_ms for cam in placement.cameras
+        }
+        # Sources define the session, so their offset is zero by construction.
+        self._audio_source_alignments = {
+            source.source_id: AudioSourceAlignment(
+                source_id=source.source_id,
+                path=source.path,
+                channel_index=source.channel_index,
+                offset_ms=0.0,
+                status="ok",
+                message="Defines the session timeline (offset 0 by construction)",
+            )
+            for source in self._audio_sources
+        }
+
+        for cam in placement.cameras:
+            logger.info(
+                "Camera %d placed on session: offset=%.3f ms (refined=%s, "
+                "peak=%.2f, ratio=%.1f)",
+                cam.camera_index, cam.session_offset_ms, cam.refined,
+                cam.peak, cam.peak_ratio,
+            )
+
+        self._emit_progress(100, "Alignment complete")
+        return True
 
     def _stage_diarize(self) -> bool:
         """
@@ -845,6 +944,18 @@ class ProcessingPipeline:
             self._qa_exporter.set_diarization([])
             self._emit_progress(100, "Speaker switching disabled (single camera mode)")
             return True
+
+        if self._audio_sources:
+            # Detection still reads camera audio / video in camera time, which
+            # does not match the session timeline the cut plan is built on.
+            message = (
+                "Speaker detection with configured audio sources is not "
+                "implemented yet; turn speaker switching off or run without "
+                "audio sources"
+            )
+            logger.error(message)
+            self.signals.error.emit(message)
+            return False
 
         try:
             from ..utils.ffmpeg import extract_audio_to_wav
