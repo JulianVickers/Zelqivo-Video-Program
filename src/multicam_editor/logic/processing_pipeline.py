@@ -832,6 +832,45 @@ class ProcessingPipeline:
                     f"CameraOverride, got {type(override).__name__}"
                 )
 
+    def _camera_sources_from_mapping(self) -> Optional[dict[int, list[str]]]:
+        """Turn the UI camera-to-speaker mapping into per-camera source paths.
+
+        "Speaker N" is the Nth distinct speaker_id among the configured audio
+        sources, by first appearance. A mapped camera refines against the mix
+        of all its speaker's sources. Returns None when nothing is mapped, so
+        every camera refines against the full mix. Raises ValueError for a
+        speaker the sources do not define or a camera mapped to two speakers.
+        """
+        speaker_map = self._config.speaker_to_cameras_map
+        if not speaker_map:
+            return None
+
+        speakers: dict[str, list[str]] = {}
+        for source in self._audio_sources:
+            speaker_id = (source.speaker_id or "").strip()
+            if speaker_id:
+                speakers.setdefault(speaker_id, []).append(source.path)
+        ordered = [list(dict.fromkeys(paths)) for paths in speakers.values()]
+
+        result: dict[int, list[str]] = {}
+        owner: dict[int, int] = {}
+        for speaker_index in sorted(speaker_map):
+            if not 0 <= speaker_index < len(ordered):
+                raise ValueError(
+                    f"Speaker {speaker_index + 1} is mapped to a camera, but the "
+                    f"audio sources define only {len(ordered)} speaker(s)"
+                )
+            for camera_index in speaker_map[speaker_index]:
+                if camera_index in owner:
+                    raise ValueError(
+                        f"camera {camera_index} is mapped to both "
+                        f"Speaker {owner[camera_index] + 1} and "
+                        f"Speaker {speaker_index + 1}"
+                    )
+                owner[camera_index] = speaker_index
+                result[camera_index] = list(ordered[speaker_index])
+        return result
+
     def _align_to_session(self) -> bool:
         """Place every camera on the mixer-session timeline.
 
@@ -850,10 +889,19 @@ class ProcessingPipeline:
         self._emit_progress(5, "Placing cameras on the session timeline...")
 
         try:
+            camera_sources = self._camera_sources_from_mapping()
+        except ValueError as exc:
+            message = f"Invalid camera-to-speaker mapping: {exc}"
+            logger.error(message)
+            self.signals.error.emit(message)
+            return False
+
+        try:
             placement = place_cameras_on_session(
                 self.input_files,
                 [source.path for source in self._audio_sources],
                 overrides=self._camera_overrides or None,
+                camera_sources=camera_sources,
             )
         except SessionPlacementError as exc:
             logger.error("Session placement failed: %s", exc)
