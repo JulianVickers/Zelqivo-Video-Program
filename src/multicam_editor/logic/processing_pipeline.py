@@ -13,7 +13,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from PySide6.QtCore import QSettings
 
@@ -38,6 +38,9 @@ from .audio_sources import (
 from .qa_artifacts import QAArtifactExporter
 from .video_merger import SegmentRenderer, CutDefinition, concatenate_segments, render_single_pass
 from .checkpoint import PipelineCheckpoint, save_checkpoint, delete_checkpoint
+
+if TYPE_CHECKING:
+    from .session_placement import CameraOverride
 
 logger = logging.getLogger(__name__)
 
