@@ -1029,71 +1029,32 @@ class ProcessingPipeline:
                 logger.info("BALANCED: Starting hybrid detection")
                 self._emit_progress(50, "Initializing hybrid detection...")
                 
-                # Hybrid backend handles audio extraction internally or we pass it?
-                # The engine returned by select_switching_engine is initialized.
-                # However, HybridBackend.detect_speakers in V1 might expect audio_path if it doesn't do extraction itself.
-                # Let's check HybridBackend.detect_speakers signature.
-                # Assuming it matches valid usage. If it needs audio_path, we might need to extract it first.
-                # But select_switching_engine returns an instance.
-                # Let's trust the engine abstraction or check if we need to do extraction here.
-                # The old code did extraction:
-                # audio_result = extract_audio_to_wav(...)
-                # hybrid_detector.detect_speakers(..., audio_path=audio_path, ...)
-                
-                # If the new HybridBackend wrapper handles it, great. If not, we need to replicate that.
-                # Let's assume for now we need to extract audio if the backend requires it.
-                # But wait, select_switching_engine returns `HybridBackend`.
-                # Does `HybridBackend` require `audio_path` in `detect_speakers`?
-                # I should probably include the audio extraction logic if it's not inside the backend.
-                # But to keep this chunk clean, let's assume I need to do what the old code did if I want to be safe,
-                # OR better: The "HybridBackend" used here is imported from `.active_speaker`.
-                # I'll check if I can check `detect_speakers` signature quickly.
-                # But I'm in a tool call.
-                # I will preserve the audio extraction logic just in case, or move it before the if/else if common.
-                # Actually, `LipMovementBackend` doesn't need audio path.
-                
-                # To be safe and implementing correctly:
-                # 1. Extract audio if strategy is BALANCED (Hybrid).
-                # 2. Call detect_speakers.
-                
-                # Or, if I want to be cleaner:
-                
-                # Extract audio for Hybrid
-                audio_path = None
-                if strategy == SwitchingStrategy.BALANCED_LIPS_ENERGY:
-                    from ..utils.ffmpeg import extract_audio_to_wav
-                    self._emit_progress(20, "Extracting audio for speech detection...")
-                    
-                    target_file = self.input_files[0]
-                    if hasattr(self, '_external_audio_path') and self._external_audio_path:
-                        target_file = self._external_audio_path
-                        logger.info("Using external audio: %s", target_file)
-                    
-                    audio_result = extract_audio_to_wav(target_file, sample_rate=16000, mono=True)
-                    if not audio_result.success:
-                         raise RuntimeError(f"Audio extraction failed: {audio_result.error}")
-                    
-                    audio_path = audio_result.output_path
-                    self._temp_files.append(audio_path)
-                    
-                    # Calculate duration from probe results
-                    duration_ms = self._timeline_duration_ms()
-                    
-                    self._speaker_segments = engine.detect_speakers(
-                        video_paths=self.input_files,
-                        audio_path=audio_path,
-                        duration_ms=duration_ms,
-                        progress_callback=on_diarization_progress,
-                        cancel_callback=lambda: self._cancelled
-                    )
-                else:
-                    # BEST_LIPS
-                     self._speaker_segments = engine.detect_speakers(
-                        video_paths=self.input_files,
-                        progress_callback=on_diarization_progress,
-                        # No audio path needed for lips
-                    )
-                     
+                # Hybrid needs a mono 16 kHz WAV for its audio VAD; prefer the
+                # external audio file when one is set.
+                self._emit_progress(20, "Extracting audio for speech detection...")
+
+                target_file = self.input_files[0]
+                if getattr(self, "_external_audio_path", None):
+                    target_file = self._external_audio_path
+                    logger.info("Using external audio: %s", target_file)
+
+                audio_result = extract_audio_to_wav(target_file, sample_rate=16000, mono=True)
+                if not audio_result.success:
+                    raise RuntimeError(f"Audio extraction failed: {audio_result.error}")
+
+                audio_path = audio_result.output_path
+                self._temp_files.append(audio_path)
+
+                duration_ms = self._timeline_duration_ms()
+
+                self._speaker_segments = engine.detect_speakers(
+                    video_paths=self.input_files,
+                    audio_path=audio_path,
+                    duration_ms=duration_ms,
+                    progress_callback=on_diarization_progress,
+                    cancel_callback=lambda: self._cancelled,
+                )
+
                 logger.info("Detection complete: %d segments", len(self._speaker_segments))
 
             elif strategy == SwitchingStrategy.FAST_RULES:
