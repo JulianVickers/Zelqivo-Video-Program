@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Session placement now refines every camera's offset against the session mix
+  (waveform refinement); if the refinement windows disagree by more than 25 ms
+  the coarse offset is kept and a warning is logged.
 - **License changed from MIT to Apache-2.0**, with the real copyright holder
   (Roman Berlin) replacing the "Owner" placeholder. Apache-2.0 adds an explicit
   patent grant and trademark reservation, which the open-core model needs.
@@ -27,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pytest-qt` added to the dev extras so the Qt test files run in the standard suite.
 
 ### Added
+- **Multi-source session timeline** (backend only; the mapping UI is not wired
+  yet): external audio sources (e.g. mixer exports) and cameras are placed on one
+  shared session timeline. The mixer session is the ruler; the output always spans
+  the whole session, with black video where no camera has footage and silence
+  where there is no audio. A camera that cannot be placed stops the run with an
+  error naming the camera and the numbers involved.
+- Per-camera `manual_offset_ms` and `exclude` overrides as escape hatches for
+  session placement, and the session audio mix is muxed in the concat stage.
+- **Speaker detection on audio sources**: with configured sources, active
+  speakers are detected on the clean per-speaker tracks instead of camera
+  audio. Fast (Energy) backend only; Hybrid and Lips are refused for now.
+- **Wide-shot pass** for a camera that is not mapped to any speaker, fully
+  automatic: cut to the wide shot after 2 s of nobody speaking, and a 3 s
+  cutaway after a 20 s hold on one camera. Cutaways only land inside the wide
+  camera's footage. It runs after the decision engine and never changes it.
 - **Runtime H.264 encoder selection**: hardware encoders (NVIDIA NVENC, Intel
   QSV, AMD AMF, Apple VideoToolbox) are detected and preferred automatically,
   with `libopenh264`/`libx264` as software fallbacks — replacing six hardcoded
@@ -61,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a hardcoded path, and fail with a clear message pointing at BtbN LGPL builds.
 
 ### Fixed
+- Detection on audio sources no longer collapses on quiet mixer exports: the
+  legacy absolute silence floor (0.01, tuned for hot camera audio) gated out
+  almost everything (4 segments in 22 minutes on a real session). Sources now use
+  a floor of 1e-4.
 - Single-pass rendering now uses FFmpeg 7.1+'s file-backed filter option syntax,
   while retaining the legacy filter-script option for older FFmpeg versions.
 - GPU preflight now recognizes Apple Silicon acceleration through PyTorch's MPS
