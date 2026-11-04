@@ -133,7 +133,6 @@ def place_cameras_on_session(
     source_paths: Sequence[str],
     *,
     overrides: Mapping[int, CameraOverride] | None = None,
-    camera_sources: Mapping[int, Sequence[str]] | None = None,
     decode: Callable[[str], np.ndarray] = decode_mono_16k,
 ) -> SessionPlacement:
     """Place every camera on the session timeline defined by the sources.
@@ -141,10 +140,8 @@ def place_cameras_on_session(
     ``overrides`` maps a camera index to a ``CameraOverride``. Manual and
     excluded cameras skip the coarse match; the rest are matched as before.
 
-    ``camera_sources`` maps a camera index to the source paths its sample-level
-    refinement should use as reference (a mapped speaker's own audio). Cameras
-    not listed refine against the mix of all sources. The coarse match always
-    uses the whole session.
+    Sample-level refinement correlates every camera against the mix of all
+    sources, like the coarse match.
     """
     sources = list(dict.fromkeys(source_paths))  # one decode per distinct file
     if not sources:
@@ -165,20 +162,6 @@ def place_cameras_on_session(
         raise SessionPlacementError(
             "All cameras are excluded; nothing to place on the session timeline"
         )
-    camera_sources = {i: list(p) for i, p in (camera_sources or {}).items()}
-    for index in sorted(camera_sources):
-        if not 0 <= index < count:
-            raise SessionPlacementError(
-                f"Sources given for camera {index}, but there are only {count} "
-                f"camera(s) (valid indices: 0-{count - 1})"
-            )
-        if not camera_sources[index]:
-            raise SessionPlacementError(f"Camera {index} was given no sources")
-        for path in camera_sources[index]:
-            if path not in sources:
-                raise SessionPlacementError(
-                    f"Camera {index}: {os.path.basename(path)} is not an audio source"
-                )
     auto = [i for i in range(count) if not _is_manual_or_excluded(overrides.get(i))]
 
     cache: dict[str, np.ndarray] = {}
@@ -222,7 +205,6 @@ def place_cameras_on_session(
     by_index = dict(zip(auto, alignments))
 
     session_mix: np.ndarray | None = None
-    own_mixes: dict[tuple[str, ...], np.ndarray] = {}
     cameras: list[CameraPlacement] = []
     for index, path in enumerate(camera_paths):
         override = overrides.get(index)
@@ -268,22 +250,11 @@ def place_cameras_on_session(
                     cache.pop(path, None)
                 if camera_audio is None:
                     raise RuntimeError("camera audio is not available")
-                own = camera_sources.get(index)
-                if own is None:
-                    if session_mix is None:
-                        session_mix = mix_sources([
-                            np.pad(a, (0, session_samples - len(a))) for a in source_audio
-                        ])
-                    reference = session_mix
-                else:
-                    key = tuple(own)
-                    if key not in own_mixes:
-                        own_mixes[key] = mix_sources([
-                            np.pad(a, (0, session_samples - len(a)))
-                            for a in (cached_decode(p) for p in key)
-                        ])
-                    reference = own_mixes[key]
-                result = refine_offset(camera_audio, reference, coarse)
+                if session_mix is None:
+                    session_mix = mix_sources([
+                        np.pad(a, (0, session_samples - len(a))) for a in source_audio
+                    ])
+                result = refine_offset(camera_audio, session_mix, coarse)
             except Exception as exc:
                 logger.warning("Refinement failed for %s: %s", name, exc)
                 warnings.append(

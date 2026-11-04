@@ -836,9 +836,9 @@ class ProcessingPipeline:
         """Turn the UI camera-to-speaker mapping into per-camera source paths.
 
         "Speaker N" is the Nth distinct speaker_id among the configured audio
-        sources, by first appearance. A mapped camera refines against the mix
-        of all its speaker's sources. Returns None when nothing is mapped, so
-        every camera refines against the full mix. Raises ValueError for a
+        sources, by first appearance. Returns each mapped camera's speaker
+        sources, or None when nothing is mapped (placement itself refines
+        every camera against the full session mix). Raises ValueError for a
         speaker the sources do not define or a camera mapped to two speakers.
         """
         speaker_map = self._config.speaker_to_cameras_map
@@ -889,7 +889,8 @@ class ProcessingPipeline:
         self._emit_progress(5, "Placing cameras on the session timeline...")
 
         try:
-            camera_sources = self._camera_sources_from_mapping()
+            # Validation only: placement refines every camera against the mix.
+            self._camera_sources_from_mapping()
         except ValueError as exc:
             message = f"Invalid camera-to-speaker mapping: {exc}"
             logger.error(message)
@@ -901,7 +902,6 @@ class ProcessingPipeline:
                 self.input_files,
                 [source.path for source in self._audio_sources],
                 overrides=self._camera_overrides or None,
-                camera_sources=camera_sources,
             )
         except SessionPlacementError as exc:
             logger.error("Session placement failed: %s", exc)

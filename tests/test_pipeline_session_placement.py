@@ -294,12 +294,25 @@ def _align_with_map(speaker_map, sources, files=("a.mp4", "b.mp4", "c.mp4")):
     return ok, errors, placed
 
 
-def test_no_mapping_passes_no_camera_sources():
+
+def _mapping(speaker_map, sources, files=("a.mp4", "b.mp4", "c.mp4")):
+    pipeline, _ = _make(files, sources)
+    pipeline._config = PipelineConfig(speaker_to_cameras_map=speaker_map)
+    return pipeline._camera_sources_from_mapping()
+
+
+def test_no_mapping_has_no_camera_sources():
+    assert _mapping({}, [_speaker("t", "/rec/t.wav", "travis")]) is None
+
+
+def test_placement_is_given_no_camera_sources():
+    """Every camera refines against the full session mix."""
     ok, errors, placed = _align_with_map(
-        {}, [_speaker("t", "/rec/t.wav", "travis")]
+        {0: [0]}, [_speaker("t", "/rec/t.wav", "travis")]
     )
     assert ok and not errors
-    assert placed.call_args.kwargs["camera_sources"] is None
+    assert "camera_sources" not in placed.call_args.kwargs
+
 
 
 def test_mapping_becomes_per_camera_source_paths():
@@ -307,13 +320,12 @@ def test_mapping_becomes_per_camera_source_paths():
         _speaker("t", "/rec/t.wav", "travis"),
         _speaker("d", "/rec/d.wav", "dakota"),
     ]
-    ok, errors, placed = _align_with_map({0: [0], 1: [1, 2]}, sources)
-    assert ok and not errors
-    assert placed.call_args.kwargs["camera_sources"] == {
+    assert _mapping({0: [0], 1: [1, 2]}, sources) == {
         0: ["/rec/t.wav"],
         1: ["/rec/d.wav"],
         2: ["/rec/d.wav"],
     }
+
 
 
 def test_speaker_with_several_sources_uses_all_of_them():
@@ -322,11 +334,8 @@ def test_speaker_with_several_sources_uses_all_of_them():
         _speaker("t2", "/rec/t2.wav", "travis"),
         _speaker("d", "/rec/d.wav", "dakota"),
     ]
-    ok, _, placed = _align_with_map({0: [0]}, sources)
-    assert ok
-    assert placed.call_args.kwargs["camera_sources"] == {
-        0: ["/rec/t1.wav", "/rec/t2.wav"],
-    }
+    assert _mapping({0: [0]}, sources) == {0: ["/rec/t1.wav", "/rec/t2.wav"]}
+
 
 
 def test_speaker_numbers_follow_first_appearance_in_sources():
@@ -334,9 +343,7 @@ def test_speaker_numbers_follow_first_appearance_in_sources():
         _speaker("d", "/rec/d.wav", "dakota"),
         _speaker("t", "/rec/t.wav", "travis"),
     ]
-    ok, _, placed = _align_with_map({0: [1]}, sources)
-    assert ok
-    assert placed.call_args.kwargs["camera_sources"] == {1: ["/rec/d.wav"]}
+    assert _mapping({0: [1]}, sources) == {1: ["/rec/d.wav"]}
 
 
 def test_speaker_beyond_available_sources_fails_before_placement():
