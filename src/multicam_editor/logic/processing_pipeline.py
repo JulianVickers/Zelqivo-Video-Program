@@ -1274,10 +1274,14 @@ class ProcessingPipeline:
                 self._temp_files.append(result.output_path)
 
             self._emit_progress(45, "Analyzing audio energy levels...")
-            # Same tuning as the legacy FAST_RULES path.
+            # Same tuning as the legacy FAST_RULES path, except the silence
+            # floor: 0.01 is tuned for hot camera audio and sits above the
+            # speech level of mixer exports (RMS ~0.01-0.02), which gated
+            # everything out. 1e-4 (about -80 dBFS) only guards all-zero
+            # channels; the adaptive p20 noise floor does the real work.
             backend = RealEnergyVADBackend(
                 window_ms=200,
-                silence_threshold=0.01,
+                silence_threshold=1e-4,
                 min_segment_ms=500,
                 noise_percentile=20,
                 gate_factor=2.5,

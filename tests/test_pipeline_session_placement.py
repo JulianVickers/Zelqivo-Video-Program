@@ -567,3 +567,74 @@ def test_speaker_with_all_sources_disabled_for_detection_is_an_error(detection):
     assert ok is False
     assert len(errors) == 1 and "enabled for detection" in errors[0]
     assert detection.extract_calls == [] and detection.backends == []
+
+
+import wave
+
+import numpy as np
+
+
+@pytest.fixture
+def real_energy_detection(monkeypatch, tmp_path):
+    """Fake only WAV extraction; the real energy backend analyses the files."""
+    wavs = {}
+
+    def fake_extract(path, sample_rate=16000, mono=True, channel_index=None):
+        return SimpleNamespace(success=True, output_path=wavs[path], error=None)
+
+    monkeypatch.setattr(_EXTRACT, fake_extract)
+    monkeypatch.setattr(
+        ProcessingPipeline,
+        "_load_switching_strategy",
+        lambda self: SwitchingStrategy.FAST_RULES,
+    )
+
+    def write(source_path, samples):
+        out = str(tmp_path / (os.path.basename(source_path) + ".wav"))
+        with wave.open(out, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+        wavs[source_path] = out
+
+    return SimpleNamespace(write=write)
+
+
+def test_quiet_mixer_exports_are_not_gated_away(real_energy_detection):
+    """Real PageBrahs levels: speech RMS 0.009/0.024/0.013 over a 0.0002 floor.
+
+    The legacy 0.01 silence floor put every gate above these levels, so
+    detection collapsed to a single segment.
+    """
+    rate, turn_s = 16000, 6
+    levels = [0.009, 0.024, 0.013]  # travis, dakota, julian
+    turns = [0, 1, 2] * 5
+    total = len(turns) * turn_s * rate
+    rng = np.random.default_rng(7)
+    signals = [rng.normal(0, 0.0002, total) for _ in levels]
+    for t, speaker in enumerate(turns):
+        a, b = t * turn_s * rate, (t + 1) * turn_s * rate
+        signals[speaker][a:b] = rng.normal(0, levels[speaker], b - a)
+
+    sources = [
+        AudioSource(source_id="t", path="/rec/t.wav", speaker_id="travis"),
+        AudioSource(source_id="d", path="/rec/d.wav", speaker_id="dakota"),
+        AudioSource(source_id="j", path="/rec/j.wav", speaker_id="julian"),
+    ]
+    for source, samples in zip(sources, signals):
+        real_energy_detection.write(source.path, samples)
+
+    camera_of = [2, 0, 1]  # speaker index -> camera index
+    pipeline, ok, errors = _diarize({0: [2], 1: [0], 2: [1]}, sources)
+    assert ok and not errors
+
+    rows = _rows(pipeline)
+    assert len(rows) >= 12, rows
+
+    def camera_at(ms):
+        return next((c for s, e, c in rows if s <= ms < e), None)
+
+    for t, speaker in enumerate(turns):
+        middle = int((t * turn_s + turn_s / 2) * 1000)
+        assert camera_at(middle) == camera_of[speaker], (t, middle, rows)
