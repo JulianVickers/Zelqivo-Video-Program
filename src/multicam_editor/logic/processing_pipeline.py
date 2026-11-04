@@ -981,16 +981,7 @@ class ProcessingPipeline:
             return True
 
         if self._audio_sources:
-            # Detection still reads camera audio / video in camera time, which
-            # does not match the session timeline the cut plan is built on.
-            message = (
-                "Speaker detection with configured audio sources is not "
-                "implemented yet; turn speaker switching off or run without "
-                "audio sources"
-            )
-            logger.error(message)
-            self.signals.error.emit(message)
-            return False
+            return self._diarize_from_sources()
 
         try:
             from ..utils.ffmpeg import extract_audio_to_wav
@@ -1173,6 +1164,157 @@ class ProcessingPipeline:
             self.signals.error.emit(f"Hybrid detection failed: {e}")
             return False
 
+
+    def _diarize_from_sources(self) -> bool:
+        """Fast (Energy) speaker detection on the configured audio sources.
+
+        Sources sit at offset 0 on the session timeline, so the segments come
+        back in session time with no offset handling. Each mapped speaker is
+        analysed once; the returned speaker index is remapped to the lowest
+        numbered non-excluded camera mapped to that speaker. Unmapped cameras
+        (Auto, a wide shot) never receive segments.
+        """
+        from ..utils.ffmpeg import extract_audio_to_wav
+        from .audio_plan import AudioPlanError, resolve_camera_audio_plan
+        from .audio_sources import CameraSpeakerAssignment
+
+        def fail(message: str) -> bool:
+            logger.error(message)
+            self.signals.error.emit(message)
+            return False
+
+        strategy = self._load_switching_strategy()
+        if strategy != SwitchingStrategy.FAST_RULES:
+            return fail(
+                "Speaker detection with configured audio sources supports only the "
+                "Fast (Energy) strategy; change the strategy in settings or run "
+                "without audio sources"
+            )
+
+        speaker_map = self._config.speaker_to_cameras_map
+        if not speaker_map:
+            return fail(
+                "Speaker switching with audio sources needs at least one camera "
+                "mapped to a speaker; map cameras or turn speaker switching off"
+            )
+
+        try:
+            # Validates speaker numbers and cameras mapped to two speakers.
+            self._camera_sources_from_mapping()
+        except ValueError as exc:
+            return fail(f"Invalid camera-to-speaker mapping: {exc}")
+
+        speaker_ids = list(dict.fromkeys(
+            (src.speaker_id or "").strip()
+            for src in self._audio_sources
+            if (src.speaker_id or "").strip()
+        ))
+        excluded: set[int] = set()
+        if self._session_placement is not None:
+            excluded = {
+                cam.camera_index for cam in self._session_placement.cameras
+                if cam.status == "excluded"
+            }
+
+        chosen: list[tuple[int, str]] = []  # (camera index, speaker id)
+        for speaker_index in sorted(speaker_map):
+            cameras = sorted(c for c in speaker_map[speaker_index] if c not in excluded)
+            if not cameras:
+                logger.warning(
+                    "Speaker %d has only excluded cameras; skipping its detection",
+                    speaker_index + 1,
+                )
+                continue
+            chosen.append((cameras[0], speaker_ids[speaker_index]))
+        if not chosen:
+            return fail("Every camera mapped to a speaker is excluded; nothing to detect")
+
+        try:
+            plan = resolve_camera_audio_plan(
+                len(self.input_files),
+                self._audio_sources,
+                [CameraSpeakerAssignment(camera_index=c, speaker_id=s) for c, s in chosen],
+            )
+        except AudioPlanError as exc:
+            return fail(f"Cannot choose detection audio: {exc}")
+
+        sources = []
+        for camera_index, speaker_id in chosen:
+            source = plan[camera_index].source
+            if source is None:
+                return fail(
+                    f"Speaker {speaker_id!r} has no audio source enabled for detection"
+                )
+            sources.append(source)
+
+        try:
+            detection_start = time.time()
+            self._detection_model = "Fast (Energy)"
+            self._emit_progress(10, "Extracting audio from sources...")
+
+            wav_paths = []
+            for i, source in enumerate(sources):
+                if self._cancelled:
+                    return False
+                self._emit_progress(
+                    10 + int((i + 1) * 30 / len(sources)),
+                    f"Extracting audio from source {i + 1}/{len(sources)}...",
+                )
+                result = extract_audio_to_wav(
+                    source.path,
+                    sample_rate=16000,
+                    mono=True,
+                    channel_index=source.channel_index,
+                )
+                if not result.success:
+                    raise RuntimeError(
+                        f"Audio extraction failed for source {source.source_id}: {result.error}"
+                    )
+                wav_paths.append(result.output_path)
+                self._temp_files.append(result.output_path)
+
+            self._emit_progress(45, "Analyzing audio energy levels...")
+            # Same tuning as the legacy FAST_RULES path.
+            backend = RealEnergyVADBackend(
+                window_ms=200,
+                silence_threshold=0.01,
+                min_segment_ms=500,
+                noise_percentile=20,
+                gate_factor=2.5,
+                hysteresis_ratio=1.6,
+                consecutive_wins=3,
+                hold_time_ms=2000,
+                cancel_callback=lambda: self._cancelled,
+            )
+            backend.set_camera_audio_paths(wav_paths)
+            self._emit_progress(60, "Detecting active speakers...")
+            raw = backend.diarize(audio_path="", num_channels=len(wav_paths))
+
+            camera_of = [camera for camera, _ in chosen]
+            segments = []
+            for seg in raw:
+                if not 0 <= seg.speaker_id < len(camera_of):
+                    raise RuntimeError(
+                        f"Detection returned unknown speaker index {seg.speaker_id}"
+                    )
+                segments.append(SpeakerSegment(
+                    start_ms=seg.start_ms,
+                    end_ms=seg.end_ms,
+                    speaker_id=camera_of[seg.speaker_id],
+                ))
+            self._speaker_segments = segments
+            self._qa_exporter.set_diarization(self._speaker_segments)
+            self._detection_time_s = time.time() - detection_start
+            logger.info(
+                "Source detection complete: %d segments in %.1fs",
+                len(segments), self._detection_time_s,
+            )
+            self._emit_progress(100, f"Detection complete: {len(segments)} segments")
+            return True
+        except Exception as e:
+            logger.error("Source detection failed: %s", e, exc_info=True)
+            self.signals.error.emit(f"Speaker detection failed: {e}")
+            return False
 
     def _apply_speaker_to_camera_mapping(
         self,
