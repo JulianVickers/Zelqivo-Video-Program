@@ -234,3 +234,104 @@ def test_source_length_mismatch_warns_and_uses_longest():
 
     assert placement.session_duration_ms == 60_000
     assert any("duration" in w.lower() for w in placement.warnings)
+
+
+# --- per-camera refinement reference -------------------------------------
+
+
+def _two_source_audio():
+    a = speechlike(60 * SR, seed=11)
+    b = speechlike(60 * SR, seed=12)
+    mix = 0.5 * (a + b)
+    audio = FakeAudio({
+        "/x/a.wav": a,
+        "/x/b.wav": b,
+        "/x/cam0.mp4": camera_recording(mix, 80_000, seed=21),
+        "/x/cam1.mp4": camera_recording(mix, 96_000, seed=22),
+    })
+    return a, b, audio
+
+
+@pytest.fixture
+def refine_refs(monkeypatch):
+    """Record the reference array each refine_offset call receives."""
+    real = sp.refine_offset
+    refs: list[np.ndarray] = []
+
+    def spy(camera_audio, reference, coarse, *args, **kwargs):
+        refs.append(np.array(reference))
+        return real(camera_audio, reference, coarse, *args, **kwargs)
+
+    monkeypatch.setattr(sp, "refine_offset", spy)
+    return refs
+
+
+def test_default_refines_every_camera_against_the_full_mix(refine_refs):
+    a, b, audio = _two_source_audio()
+    placement = place_cameras_on_session(
+        ["/x/cam0.mp4", "/x/cam1.mp4"], ["/x/a.wav", "/x/b.wav"], decode=audio,
+    )
+    assert [c.status for c in placement.cameras] == ["ok", "ok"]
+    assert len(refine_refs) == 2
+    full = sp.mix_sources([a, b])
+    assert np.array_equal(refine_refs[0], full)
+    assert np.array_equal(refine_refs[1], full)
+
+
+def test_mapped_camera_refines_against_its_own_sources(refine_refs):
+    a, b, audio = _two_source_audio()
+    placement = place_cameras_on_session(
+        ["/x/cam0.mp4", "/x/cam1.mp4"],
+        ["/x/a.wav", "/x/b.wav"],
+        camera_sources={0: ["/x/a.wav"]},
+        decode=audio,
+    )
+    assert [c.status for c in placement.cameras] == ["ok", "ok"]
+    assert len(refine_refs) == 2
+    assert np.array_equal(refine_refs[0], sp.mix_sources([a]))  # mapped: own source
+    assert np.array_equal(refine_refs[1], sp.mix_sources([a, b]))  # unmapped: the mix
+    assert not np.array_equal(refine_refs[0], refine_refs[1])
+
+
+def test_mapped_camera_with_several_sources_uses_their_mix(refine_refs):
+    a, b, audio = _two_source_audio()
+    place_cameras_on_session(
+        ["/x/cam0.mp4", "/x/cam1.mp4"],
+        ["/x/a.wav", "/x/b.wav"],
+        camera_sources={1: ["/x/b.wav", "/x/a.wav"]},
+        decode=audio,
+    )
+    assert np.array_equal(refine_refs[1], sp.mix_sources([b, a]))
+
+
+def test_camera_sources_rejects_unknown_camera():
+    _, _, audio = _two_source_audio()
+    with pytest.raises(SessionPlacementError, match="camera 5"):
+        place_cameras_on_session(
+            ["/x/cam0.mp4", "/x/cam1.mp4"],
+            ["/x/a.wav", "/x/b.wav"],
+            camera_sources={5: ["/x/a.wav"]},
+            decode=audio,
+        )
+
+
+def test_camera_sources_rejects_path_that_is_not_a_source():
+    _, _, audio = _two_source_audio()
+    with pytest.raises(SessionPlacementError, match="not an audio source"):
+        place_cameras_on_session(
+            ["/x/cam0.mp4", "/x/cam1.mp4"],
+            ["/x/a.wav", "/x/b.wav"],
+            camera_sources={0: ["/x/other.wav"]},
+            decode=audio,
+        )
+
+
+def test_camera_sources_rejects_empty_list():
+    _, _, audio = _two_source_audio()
+    with pytest.raises(SessionPlacementError, match="no sources"):
+        place_cameras_on_session(
+            ["/x/cam0.mp4", "/x/cam1.mp4"],
+            ["/x/a.wav", "/x/b.wav"],
+            camera_sources={0: []},
+            decode=audio,
+        )
