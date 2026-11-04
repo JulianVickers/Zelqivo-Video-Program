@@ -12,12 +12,16 @@ mapped to. Two rules put it into the plan:
     camera's coverage and leave ``min_clip_ms`` of the held camera.
 
 The decision engine and the speaker detection are not involved.
+``activity_from_wav`` is the only function here that reads a file.
 """
 
 from __future__ import annotations
 
+import wave
 from dataclasses import dataclass
 from typing import Mapping, Sequence
+
+import numpy as np
 
 from .decision_engine import CutSegment
 
@@ -177,3 +181,37 @@ def _merge(cuts: Sequence[CutSegment]) -> list[CutSegment]:
         else:
             merged.append(cut)
     return merged
+
+
+def activity_from_wav(
+    path: str,
+    *,
+    window_ms: int = 200,
+    noise_percentile: int = 20,
+    gate_factor: float = 2.5,
+    silence_floor: float = 1e-4,
+) -> list[bool]:
+    """One bool per window: is the source above its own speech gate?
+
+    The gate is the energy backend's rule: the ``noise_percentile`` of the
+    window RMS values (at least ``silence_floor``) times ``gate_factor``.
+    """
+    with wave.open(path, "rb") as wf:
+        channels = wf.getnchannels()
+        width = wf.getsampwidth()
+        rate = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+    if width != 2:
+        raise ValueError(f"unsupported sample width {width} in {path}")
+    data = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32768.0
+    if channels > 1:
+        data = data[: len(data) // channels * channels].reshape(-1, channels).mean(axis=1)
+    size = int(window_ms * rate / 1000)
+    count = len(data) // size if size > 0 else 0
+    if count == 0:
+        return []
+    rms = np.sqrt((data[: count * size].reshape(count, size) ** 2).mean(axis=1))
+    ordered = np.sort(rms)
+    floor = float(ordered[max(0, min(count - 1, int(count * noise_percentile / 100)))])
+    gate = max(floor, silence_floor) * gate_factor
+    return [bool(v) for v in rms >= gate]

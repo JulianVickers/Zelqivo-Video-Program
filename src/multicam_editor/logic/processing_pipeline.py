@@ -205,6 +205,8 @@ class ProcessingPipeline:
         # Results from stages
         self._probe_results: List[ProbeResult] = []
         self._speaker_segments: List[SpeakerSegment] = []
+        # Per camera: is its speaker active, per 200 ms window (sources path)
+        self._source_activity: dict[int, list[bool]] = {}
         self._cut_plan: List[CutSegment] = []
 
         # Camera alignment offsets (camera_idx -> offset_ms)
@@ -1308,6 +1310,16 @@ class ProcessingPipeline:
                 ))
             self._speaker_segments = segments
             self._qa_exporter.set_diarization(self._speaker_segments)
+            try:
+                from .wide_shot import activity_from_wav
+
+                self._source_activity = {
+                    camera: activity_from_wav(path)
+                    for camera, path in zip(camera_of, wav_paths)
+                }
+            except Exception as exc:  # the wide-shot pass is optional
+                logger.warning("Speaker activity unavailable: %s", exc)
+                self._source_activity = {}
             self._detection_time_s = time.time() - detection_start
             logger.info(
                 "Source detection complete: %d segments in %.1fs",
@@ -1385,6 +1397,56 @@ class ProcessingPipeline:
         if self._session_placement is not None:
             return self._session_placement.session_duration_ms
         return max(r.duration_ms for r in self._probe_results)
+
+    def _apply_wide_shot(self) -> None:
+        """Work the wide shot into the cut plan.
+
+        The wide shot is the lowest-numbered camera that no speaker is mapped
+        to and that is not excluded. Session mode with a speaker mapping only;
+        a failure here leaves the plan untouched and never stops the run.
+        """
+        placement = self._session_placement
+        speaker_map = self._config.speaker_to_cameras_map
+        if placement is None or not speaker_map or not self._cut_plan:
+            return
+        mapped = {c for cameras in speaker_map.values() for c in cameras}
+        excluded = frozenset(
+            cam.camera_index for cam in placement.cameras if cam.status == "excluded"
+        )
+        free = [
+            i for i in range(len(self.input_files))
+            if i not in mapped and i not in excluded
+        ]
+        if not free:
+            return
+        wide = free[0]
+
+        try:
+            from .timeline_ruler import build_camera_coverage
+            from .wide_shot import apply_wide_shot
+
+            coverage = build_camera_coverage(
+                [cam.session_offset_ms for cam in placement.cameras],
+                [r.duration_ms for r in self._probe_results],
+                excluded=excluded,
+            )[wide]
+            ranges = (
+                [(coverage.start_ms, coverage.end_ms)]
+                if coverage.end_ms > coverage.start_ms else []
+            )
+            updated = apply_wide_shot(
+                self._cut_plan,
+                wide_camera=wide,
+                wide_coverage=ranges,
+                activity=self._source_activity,
+            )
+        except Exception as exc:
+            logger.warning("Wide-shot pass skipped: %s", exc)
+            return
+        logger.info(
+            "Wide shot (camera %d): %d -> %d cuts", wide, len(self._cut_plan), len(updated)
+        )
+        self._cut_plan = updated
 
     def _repair_to_session_coverage(self) -> bool:
         """Fit the cut plan to what each camera actually recorded (session mode)."""
@@ -1549,6 +1611,9 @@ class ProcessingPipeline:
 
         # Merge adjacent cuts with same camera
         self._cut_plan = engine.merge_adjacent(self._cut_plan)
+
+        # Wide shot: nobody speaking and long holds (session mode, mapped speakers)
+        self._apply_wide_shot()
 
         # Session mode: fit cuts to camera coverage, black where nothing was recorded
         self._timeline_segments = None

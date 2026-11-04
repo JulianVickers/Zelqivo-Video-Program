@@ -645,3 +645,115 @@ def test_quiet_mixer_exports_are_not_gated_away(real_energy_detection):
     for t, speaker in enumerate(turns):
         middle = int((t * turn_s + turn_s / 2) * 1000)
         assert camera_at(middle) == camera_of[speaker], (t, middle, rows)
+
+
+from multicam_editor.logic.decision_engine import CutSegment
+
+
+def _write_wav(path, samples):
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+def test_activity_from_wav_marks_speech_windows(tmp_path):
+    from multicam_editor.logic.wide_shot import activity_from_wav
+
+    rng = np.random.default_rng(3)
+    samples = rng.normal(0, 0.0002, 12 * 16000)
+    samples[6 * 16000:] = rng.normal(0, 0.02, 6 * 16000)
+    path = tmp_path / "s.wav"
+    _write_wav(path, samples)
+    track = activity_from_wav(str(path))
+    assert len(track) == 60
+    assert not any(track[:30]) and all(track[30:])
+
+
+def test_activity_from_wav_all_silence_is_inactive(tmp_path):
+    from multicam_editor.logic.wide_shot import activity_from_wav
+
+    path = tmp_path / "z.wav"
+    _write_wav(path, np.zeros(5 * 16000))
+    track = activity_from_wav(str(path))
+    assert len(track) == 25 and not any(track)
+
+
+def test_detection_keeps_activity_by_camera(real_energy_detection):
+    rate, turn_s = 16000, 6
+    turns = [0, 1, 0, 1]
+    total = len(turns) * turn_s * rate
+    rng = np.random.default_rng(11)
+    signals = [rng.normal(0, 0.0002, total) for _ in range(2)]
+    for t, speaker in enumerate(turns):
+        a, b = t * turn_s * rate, (t + 1) * turn_s * rate
+        signals[speaker][a:b] = rng.normal(0, 0.02, b - a)
+    sources = _two_speakers()
+    for source, samples in zip(sources, signals):
+        real_energy_detection.write(source.path, samples)
+
+    pipeline, ok, errors = _diarize({0: [1], 1: [0]}, sources)
+    assert ok and not errors
+    act = pipeline._source_activity
+    assert sorted(act) == [0, 1]
+    assert len(act[1]) == 120
+    assert act[1][15] and not act[0][15]  # 3 s: speaker 0 (camera 1) talks
+    assert act[0][45] and not act[1][45]  # 9 s: speaker 1 (camera 0) talks
+
+
+def _wide_pipeline(speaker_map, durations=(60000,) * 4, excluded=(), activity=None):
+    files = ("a.mp4", "b.mp4", "c.mp4", "d.mp4")[: len(durations)]
+    pipeline, _ = _make(files, [_speaker("t", "/rec/t.wav", "travis")])
+    pipeline._config = PipelineConfig(speaker_to_cameras_map=speaker_map)
+    pipeline._session_placement = SimpleNamespace(cameras=[
+        SimpleNamespace(
+            camera_index=i,
+            session_offset_ms=0.0,
+            status="excluded" if i in excluded else "ok",
+        )
+        for i in range(len(files))
+    ])
+    pipeline._probe_results = [SimpleNamespace(duration_ms=d) for d in durations]
+    pipeline._cut_plan = [CutSegment(0, 60000, 0)]
+    pipeline._source_activity = activity or {}
+    return pipeline
+
+
+def _plan(pipeline):
+    return [(c.start_ms, c.end_ms, c.camera_id) for c in pipeline._cut_plan]
+
+
+def test_wide_shot_cutaways_use_the_unmapped_camera():
+    pipeline = _wide_pipeline({0: [0], 1: [1], 2: [2]})
+    pipeline._apply_wide_shot()
+    assert _plan(pipeline) == [
+        (0, 20000, 0), (20000, 23000, 3), (23000, 43000, 0),
+        (43000, 46000, 3), (46000, 60000, 0),
+    ]
+
+
+def test_wide_shot_skipped_when_every_camera_is_mapped():
+    pipeline = _wide_pipeline({0: [0], 1: [1], 2: [2], 3: [3]})
+    pipeline._apply_wide_shot()
+    assert _plan(pipeline) == [(0, 60000, 0)]
+
+
+def test_wide_shot_skipped_when_nothing_is_mapped():
+    pipeline = _wide_pipeline({})
+    pipeline._apply_wide_shot()
+    assert _plan(pipeline) == [(0, 60000, 0)]
+
+
+def test_wide_shot_skipped_when_the_wide_camera_is_excluded():
+    pipeline = _wide_pipeline({0: [0], 1: [1], 2: [2]}, excluded=(3,))
+    pipeline._apply_wide_shot()
+    assert _plan(pipeline) == [(0, 60000, 0)]
+
+
+def test_wide_shot_stays_inside_the_wide_cameras_footage():
+    pipeline = _wide_pipeline(
+        {0: [0], 1: [1], 2: [2]}, durations=(60000, 60000, 60000, 15000)
+    )
+    pipeline._apply_wide_shot()
+    assert _plan(pipeline) == [(0, 60000, 0)]
