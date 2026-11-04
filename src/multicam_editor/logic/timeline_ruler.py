@@ -52,13 +52,28 @@ class CameraCoverage:
 def build_camera_coverage(
     session_offsets_ms: Sequence[float],
     durations_ms: Sequence[int],
+    *,
+    excluded: frozenset[int] | set[int] = frozenset(),
 ) -> tuple[CameraCoverage, ...]:
-    """Build one ``CameraCoverage`` per camera, in camera order."""
+    """Build one ``CameraCoverage`` per camera, in camera order.
+
+    Cameras in ``excluded`` get empty coverage (start == end == 0), so the
+    repair never uses them; their durations are not checked.
+    """
     if len(session_offsets_ms) != len(durations_ms):
         raise ValueError("need one duration per session offset")
+    excluded = frozenset(excluded)
+    for index in sorted(excluded):
+        if not 0 <= index < len(durations_ms):
+            raise ValueError(f"excluded camera {index} does not exist")
 
     coverage = []
     for index, (offset, duration) in enumerate(zip(session_offsets_ms, durations_ms)):
+        if index in excluded:
+            coverage.append(CameraCoverage(
+                camera_index=index, seek_offset_ms=0.0, start_ms=0, end_ms=0,
+            ))
+            continue
         if duration <= 0:
             raise ValueError(f"camera {index} has a non-positive duration")
         seek = session_offset_to_seek_offset(offset)

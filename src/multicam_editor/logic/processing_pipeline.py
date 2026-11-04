@@ -208,6 +208,7 @@ class ProcessingPipeline:
         self._camera_offsets: dict[int, float] = {}
         # Per-run external audio configuration and synchronization results.
         self._audio_sources: List[AudioSource] = []
+        self._camera_overrides = {}
         self._external_audio_path: Optional[str] = None
         self._audio_source_alignments: dict = {}
         # Camera placement on the mixer-session timeline (None unless sources are configured).
@@ -422,6 +423,7 @@ class ProcessingPipeline:
         resolution: str = "1080p",
         output_path: Optional[str] = None,
         audio_sources: Optional[List[AudioSource]] = None,
+        camera_overrides: Optional[dict[int, "CameraOverride"]] = None,
     ) -> PipelineResult:
         """Execute the full pipeline.
 
@@ -430,6 +432,8 @@ class ProcessingPipeline:
             resolution: Target resolution (e.g., "1080p").
             output_path: Where to write final output. Uses temp if None.
             audio_sources: Optional independently configured external audio sources.
+            camera_overrides: Optional per-camera escape hatches (manual offset,
+                exclude), keyed by camera index; needs audio_sources.
 
         Returns:
             PipelineResult with success status and output path.
@@ -446,11 +450,14 @@ class ProcessingPipeline:
             if audio_sources is not None and external_audio is not None:
                 raise ValueError("Pass either legacy external_audio or audio_sources, not both")
             validate_audio_sources(self._audio_sources)
+            self._validate_camera_overrides(camera_overrides)
         except ValueError as exc:
             error_message = f"Invalid audio-source configuration: {exc}"
             logger.error(error_message)
             self.signals.error.emit(error_message)
             return PipelineResult(success=False, error=error_message)
+
+        self._camera_overrides = dict(camera_overrides) if camera_overrides else {}
 
         if self._audio_sources:
             logger.info(
@@ -795,6 +802,33 @@ class ProcessingPipeline:
         self._emit_progress(100, "Alignment complete")
         return True
 
+    def _validate_camera_overrides(self, overrides) -> None:
+        """Reject camera overrides that cannot apply. Raises ValueError."""
+        from .session_placement import CameraOverride
+
+        if not overrides:
+            return
+        if not self._audio_sources:
+            raise ValueError(
+                "camera overrides need configured audio_sources: cameras are only "
+                "placed on a session timeline when audio sources define it"
+            )
+        for camera_index, override in overrides.items():
+            if isinstance(camera_index, bool) or not isinstance(camera_index, int):
+                raise ValueError(
+                    f"camera override key {camera_index!r} is not a camera index"
+                )
+            if not 0 <= camera_index < len(self.input_files):
+                raise ValueError(
+                    f"camera override for camera {camera_index}: no such camera "
+                    f"(have {len(self.input_files)})"
+                )
+            if not isinstance(override, CameraOverride):
+                raise ValueError(
+                    f"camera override for camera {camera_index} must be a "
+                    f"CameraOverride, got {type(override).__name__}"
+                )
+
     def _align_to_session(self) -> bool:
         """Place every camera on the mixer-session timeline.
 
@@ -816,6 +850,7 @@ class ProcessingPipeline:
             placement = place_cameras_on_session(
                 self.input_files,
                 [source.path for source in self._audio_sources],
+                overrides=self._camera_overrides or None,
             )
         except SessionPlacementError as exc:
             logger.error("Session placement failed: %s", exc)
@@ -1167,6 +1202,10 @@ class ProcessingPipeline:
             coverage = build_camera_coverage(
                 [cam.session_offset_ms for cam in placement.cameras],
                 [r.duration_ms for r in self._probe_results],
+                excluded=frozenset(
+                    cam.camera_index for cam in placement.cameras
+                    if cam.status == "excluded"
+                ),
             )
             repaired = repair_cut_plan(self._cut_plan, coverage)
         except ValueError as e:

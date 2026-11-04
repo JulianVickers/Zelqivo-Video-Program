@@ -89,6 +89,7 @@ class TestProcessingWorkerSignals:
             resolution="1080p",
             output_path=None,
             audio_sources=[source],
+            camera_overrides={},
         )
 
     def test_timeline_boundary_config_is_passed_to_pipeline(self):

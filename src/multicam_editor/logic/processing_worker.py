@@ -11,6 +11,7 @@ from ..utils.signals import ProcessingSignals
 from .processing_pipeline import ProcessingPipeline, PipelineProgress
 from .pipeline_config import PipelineConfig
 from .audio_sources import AudioSource, TimelineBoundaryConfig
+from .session_placement import CameraOverride
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class ProcessingWorker(QObject):
         camera_speaker_mapping: Optional[dict[int, str]] = None,
         audio_sources: Optional[List[AudioSource]] = None,
         timeline_boundary_config: Optional[TimelineBoundaryConfig] = None,
+        camera_overrides: Optional[dict[int, CameraOverride]] = None,
     ) -> None:
         super().__init__()
         self.input_files = input_files
@@ -66,6 +68,7 @@ class ProcessingWorker(QObject):
             if timeline_boundary_config is not None
             else TimelineBoundaryConfig()
         )
+        self.camera_overrides = dict(camera_overrides) if camera_overrides else {}
         self._pipeline: Optional[ProcessingPipeline] = None
 
     def cancel(self) -> None:
@@ -115,6 +118,7 @@ class ProcessingWorker(QObject):
                 resolution=self.resolution,
                 output_path=self.output_path,
                 audio_sources=self.audio_sources,
+                camera_overrides=self.camera_overrides,
             )
 
             if result.cancelled:
@@ -174,6 +178,7 @@ class ProcessingThread(QThread):
         parent: Optional[QObject] = None,
         audio_sources: Optional[List[AudioSource]] = None,
         timeline_boundary_config: Optional[TimelineBoundaryConfig] = None,
+        camera_overrides: Optional[dict[int, CameraOverride]] = None,
     ) -> None:
         super().__init__(parent)
         self.input_files = input_files
@@ -188,6 +193,7 @@ class ProcessingThread(QThread):
             if timeline_boundary_config is not None
             else TimelineBoundaryConfig()
         )
+        self.camera_overrides = dict(camera_overrides) if camera_overrides else {}
         self._worker: Optional[ProcessingWorker] = None
 
     def cancel(self) -> None:
@@ -206,6 +212,7 @@ class ProcessingThread(QThread):
             self.camera_speaker_mapping,
             audio_sources=self.audio_sources,
             timeline_boundary_config=self.timeline_boundary_config,
+            camera_overrides=self.camera_overrides,
         )
 
         # Connect worker signals to thread signals
