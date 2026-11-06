@@ -485,7 +485,8 @@ class ProcessingPipeline:
             preflight = PreflightManager()
             preflight_result = preflight.run_full_check(
                 self.input_files,
-                output_path or tempfile.gettempdir()
+                (os.path.dirname(os.path.abspath(output_path))
+                 if output_path else tempfile.gettempdir())
             )
             
             # Handle critical errors (blocking)
