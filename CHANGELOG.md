@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pytest-qt` added to the dev extras so the Qt test files run in the standard suite.
 
 ### Added
+- Multi-source audio in the GUI: an "Audio sources…" dialog (one file per
+  speaker, speaker name, detection and output flags, gain, reorder, live
+  validation) can be used instead of the single external audio file. Camera
+  speaker combos are built from the configured speakers and prefilled by
+  matching camera and audio file names; hand edits are kept. Before
+  processing, the app asks to switch to Fast for that run when another
+  strategy is selected (the saved setting is untouched) and stops on camera
+  mapping problems.
 - **Multi-source session timeline** (backend only; the mapping UI is not wired
   yet): external audio sources (e.g. mixer exports) and cameras are placed on one
   shared session timeline. The mixer session is the ruler; the output always spans

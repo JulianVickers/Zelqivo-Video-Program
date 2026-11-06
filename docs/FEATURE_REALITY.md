@@ -1,6 +1,6 @@
 # Feature Reality Matrix
 
-> **Last Updated**: 2026-02-11
+> **Last Updated**: 2026-11-06
 > **Audit Version**: 2.2
 > **Status**: COMPREHENSIVE AUDIT COMPLETE
 
@@ -13,7 +13,7 @@ This document provides an honest assessment of what actually exists in the codeb
 - **Partially Implemented**: 7
 - **UI-Only (No Backend)**: 4
 - **Stub/Placeholder**: 1
-- **Test Status**: ✅ 539 passed, 2 skipped — 32 test files, Qt tests included, 48% coverage (2 known Windows-path test failures on macOS/Linux)
+- **Test Status**: ✅ 870 passed, 2 skipped, 2 known failures (Windows-path tests on Linux/macOS); Qt tests included
 
 ---
 
@@ -36,8 +36,8 @@ This document provides an honest assessment of what actually exists in the codeb
 | **Audio Sync (Cross-correlation)** | ✅ Fully Implemented | `logic/audio_sync.py` | Yes | Yes | Requires `librosa` core dependency (always available) |
 | **External Audio** | ✅ Fully Implemented | `ui/main_window.py`, `logic/processing_pipeline.py` | Yes | Yes | Replace camera audio with external audio file |
 | **Camera-Speaker Mapping** | ✅ Fully Implemented | `ui/main_window.py` | Yes | Yes | Manual mapping of cameras to speakers |
-| **Multi-Source Session Placement** | ⚠️ Partially Implemented | `logic/session_placement.py`, `logic/waveform_refine.py`, `logic/processing_pipeline.py` | No | Yes | External audio sources and cameras on one session timeline; black/silence where uncovered; per-camera offset/exclude overrides. `main_window.py` does not pass `audio_sources` yet |
-| **Speaker Detection on Audio Sources** | ⚠️ Partially Implemented | `logic/processing_pipeline.py` (`_diarize_from_sources`) | No | Yes | Fast (Energy) backend only; Hybrid and Lips are refused |
+| **Multi-Source Session Placement** | ⚠️ Partially Implemented | `logic/session_placement.py`, `logic/waveform_refine.py`, `logic/processing_pipeline.py`, `ui/audio_sources_dialog.py`, `ui/main_window.py` | Yes | Yes | External audio sources and cameras on one session timeline; black/silence where uncovered; per-camera offset/exclude overrides. Configured through the "Audio sources…" dialog; the main window passes `audio_sources` to the pipeline. Per-camera offset/exclude overrides have no UI yet |
+| **Speaker Detection on Audio Sources** | ⚠️ Partially Implemented | `logic/processing_pipeline.py` (`_diarize_from_sources`) | Yes | Yes | Fast (Energy) backend only; Hybrid and Lips are refused. The UI offers to switch to Fast for the run when sources are configured |
 | **Wide-Shot Pass** | ⚠️ Partially Implemented | `logic/wide_shot.py`, `logic/processing_pipeline.py` (`_apply_wide_shot`) | No | Yes | Automatic cuts to an unmapped camera: nobody speaking, long holds. Settings hard-coded; "several people speak" not implemented |
 | **Output Folder Selection** | ✅ Fully Implemented | `ui/main_window.py` | Yes | Yes | User chooses output directory |
 | **Theme Switching** | ✅ Fully Implemented | `ui/theme.py`, `ui/settings_dialog.py` | Yes | Yes | Light/Dark mode with persistence |
@@ -108,7 +108,7 @@ These features require optional packages not in the core install:
 ---
 
 ### 6. Multi-Source Audio and Camera Mapping (Known Limitations)
-- **Backend only.** `main_window.py` does not pass `audio_sources`; there is no mapping UI yet.
+- **UI wired.** The "Audio sources…" dialog feeds `audio_sources` to the pipeline and builds the camera speaker combos. Sources require the Fast strategy.
 - **Detection is Fast (Energy) only** when sources are configured.
 - **Clock drift is not handled.** On a real 22-minute session every camera drifts against the session mix by about +1 ms per minute (same sign on three independent phones, so the cause is probably on the session side; this is a hypothesis). The effect over 22 minutes is under half a frame at 30 fps. At around 40 minutes or more, the three refinement windows can disagree by more than 25 ms; refinement is then rejected, the coarse offset is kept, and a warning is logged.
 - **"Several people speak" is not implemented** in the wide-shot pass. On the real session, 2 or more sources were above their gates in 38% of 200 ms windows, but the median such stretch lasted 400 ms and only 27 lasted 2 s or more, with 3 at 5 s or more. A level-gap test separates most of them, but missing brief overlap costs little, so it was left out deliberately.
