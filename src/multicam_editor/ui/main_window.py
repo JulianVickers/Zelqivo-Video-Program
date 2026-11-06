@@ -59,6 +59,16 @@ from ..logic.eta_estimation import (
 from .progress_dialog import ProcessingProgressDialog
 from .loading_dialog import LoadingDialog
 from .gpu_warning_dialog import show_gpu_warning_dialog
+from .audio_sources_dialog import show_audio_sources_dialog
+from ..logic.audio_source_config import (
+    SourceRow,
+    check_camera_mapping,
+    default_camera_mapping,
+    match_cameras_to_speakers,
+    rows_to_audio_sources,
+    speaker_choices,
+    speaker_order,
+)
 from .custom_title_bar import CustomTitleBar
 from PySide6.QtWidgets import QMessageBox
 
@@ -409,6 +419,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.lbl_external_audio, row, 1, 1, 2)
         row += 1
 
+        # Multi-source audio (one file per speaker); replaces the legacy single file
+        self._audio_source_rows: list[SourceRow] = []
+        self._touched_mapping: dict[int, str] = {}
+        self.btn_audio_sources = QPushButton("Audio sources…")
+        self.btn_audio_sources.setObjectName("btnAudioSources")
+        self.btn_audio_sources.setToolTip("Configure several audio files, one per speaker")
+        self.btn_audio_sources.setFixedWidth(120)
+        self.btn_audio_sources.clicked.connect(self._on_audio_sources_clicked)
+        layout.addWidget(self.btn_audio_sources, row, 0)
+
+        self.lbl_audio_sources = QLabel("None")
+        self.lbl_audio_sources.setObjectName("lblAudioSources")
+        self.lbl_audio_sources.setStyleSheet("color: gray;")
+        layout.addWidget(self.lbl_audio_sources, row, 1, 1, 2)
+        row += 1
+
         self._update_external_audio_ui()
 
         # 2) Speaker mapping row: label "Speaker mapping" + value "Auto" + [Edit...] button
@@ -595,6 +621,12 @@ class MainWindow(QMainWindow):
 
         self.lbl_no_cameras.setVisible(False)
 
+        source_rows = list(self._audio_source_rows)
+        camera_paths = [c.path for c in clips]
+        choices = speaker_choices(source_rows) if source_rows else []
+        prefill = default_camera_mapping(camera_paths, source_rows) if source_rows else {}
+        matches = match_cameras_to_speakers(camera_paths, source_rows) if source_rows else {}
+
         # Update available speakers based on camera count
         num_cameras = len(clips)
         self._available_speakers = ["Auto (best effort)"]
@@ -616,19 +648,26 @@ class MainWindow(QMainWindow):
 
             combo = QComboBox()
             combo.setObjectName(f"comboCamera{i}")
-            combo.addItems(self._available_speakers)
-            # Load saved mapping
-            saved = self.settings.value(f"processing/camera_{i}_speaker", "Auto (best effort)")
-            idx = combo.findText(saved)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-            combo.currentTextChanged.connect(
-                lambda text, cam=i: self._on_camera_mapping_changed(cam, text)
-            )
+            if source_rows:
+                self._populate_source_combo(combo, i, choices, prefill)
+            else:
+                combo.addItems(self._available_speakers)
+                # Load saved mapping
+                saved = self.settings.value(f"processing/camera_{i}_speaker", "Auto (best effort)")
+                idx = combo.findText(saved)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                combo.currentTextChanged.connect(
+                    lambda text, cam=i: self._on_camera_mapping_changed(cam, text)
+                )
             row_lay.addWidget(combo, 1)
 
             # Show filename hint
-            hint = QLabel(os.path.basename(clip.path)[:20])
+            hint_text = os.path.basename(clip.path)[:20]
+            match = matches.get(i)
+            if source_rows and match is not None and match.matched_file:
+                hint_text += f"  \u2190 {match.matched_file}"
+            hint = QLabel(hint_text)
             hint.setStyleSheet("color: gray; font-size: 10px;")
             row_lay.addWidget(hint)
 
@@ -636,6 +675,63 @@ class MainWindow(QMainWindow):
             self.mapping_layout.addWidget(row)
 
         self._check_mapping_warnings()
+
+    def _on_audio_sources_clicked(self) -> None:
+        """Open the audio sources dialog and apply the result."""
+        start_dir = self.settings.value("last_audio_dir", os.path.expanduser("~"))
+        rows = show_audio_sources_dialog(self._audio_source_rows, self, start_dir)
+        if rows is None:
+            return
+        self._audio_source_rows = list(rows)
+        self._update_audio_sources_ui()
+        self._refresh_camera_mapping_ui()
+
+    def _update_audio_sources_ui(self) -> None:
+        """Refresh the summary label and the legacy checkbox state."""
+        rows = self._audio_source_rows
+        if rows:
+            n = len(rows)
+            m = len(speaker_order(rows))
+            self.lbl_audio_sources.setText(
+                f"{n} source{'s' if n != 1 else ''}, {m} speaker{'s' if m != 1 else ''}"
+            )
+            self.lbl_audio_sources.setStyleSheet("")
+            self.chk_external_audio.setChecked(False)
+            self.chk_external_audio.setEnabled(False)
+        else:
+            self.lbl_audio_sources.setText("None")
+            self.lbl_audio_sources.setStyleSheet("color: gray;")
+            self.chk_external_audio.setEnabled(True)
+            self._touched_mapping.clear()
+
+    def _populate_source_combo(self, combo, camera_index: int, choices, prefill) -> None:
+        """Fill a camera combo from the configured speakers (value = 'Speaker N')."""
+        auto = self._available_speakers[0]
+        combo.addItem(auto, auto)
+        for c in choices:
+            combo.addItem(c.label, c.value)
+        wanted = prefill.get(camera_index)
+        touched = self._touched_mapping.get(camera_index)
+        if touched is not None and combo.findData(touched) >= 0:
+            wanted = touched
+        if wanted is not None:
+            idx = combo.findData(wanted)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        combo.currentIndexChanged.connect(
+            lambda _i, cam=camera_index, c=combo: self._on_source_camera_changed(cam, c)
+        )
+
+    def _on_source_camera_changed(self, camera_index: int, combo) -> None:
+        """Remember a hand-made choice so re-accepting the dialog keeps it."""
+        self._touched_mapping[camera_index] = combo.currentData()
+        self._check_mapping_warnings()
+
+    @staticmethod
+    def _combo_value(combo) -> str:
+        """Pipeline value of a camera combo: item data if set, else its text."""
+        data = combo.currentData()
+        return data if isinstance(data, str) and data else combo.currentText()
 
     def _on_camera_mapping_changed(self, camera_index: int, speaker: str) -> None:
         """Save camera-to-speaker mapping."""
@@ -681,7 +777,7 @@ class MainWindow(QMainWindow):
     def get_camera_speaker_mapping(self) -> dict[int, str]:
         """Return current camera-to-speaker mapping dict."""
         return {
-            cam: combo.currentText()
+            cam: self._combo_value(combo)
             for cam, combo in self._camera_combos.items()
         }
 
@@ -1230,6 +1326,44 @@ class MainWindow(QMainWindow):
         # This was missing, causing all modes to use the default FAST_RULES
         self.settings.setValue("switching/strategy", strategy.value)
 
+        # --- 1a. Multi-source audio guards (before the GPU preflight) ---
+        source_rows = list(self._audio_source_rows)
+        if source_rows:
+            if strategy != SwitchingStrategy.FAST_RULES:
+                reply = QMessageBox.question(
+                    self,
+                    "Audio Sources Need Fast Mode",
+                    "Multiple audio sources are not yet supported with the "
+                    "lips-based strategies.\n\n"
+                    "Switch to Fast for this run?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                # Local override for this run only; magic/director/model_index is untouched
+                strategy = SwitchingStrategy.FAST_RULES
+                self.settings.setValue("switching/strategy", strategy.value)
+
+            current_mapping = self.get_camera_speaker_mapping()
+            problems = list(check_camera_mapping(current_mapping, source_rows))
+            if (
+                not problems
+                and current_mapping
+                and all(v.startswith("Auto") for v in current_mapping.values())
+            ):
+                problems.append(
+                    "No camera is mapped to a speaker. Map each camera to a speaker "
+                    "under 'Speaker mapping'."
+                )
+            if problems:
+                QMessageBox.warning(
+                    self,
+                    "Camera Mapping Problem",
+                    "Fix these before processing:\n\n" + "\n".join(problems),
+                )
+                return
+
         # Run check
         status = run_gpu_preflight_check(
             strategy,
@@ -1311,6 +1445,9 @@ class MainWindow(QMainWindow):
 
         # Get camera-to-speaker mapping
         camera_mapping = self.get_camera_speaker_mapping()
+        audio_sources = rows_to_audio_sources(source_rows) if source_rows else None
+        if source_rows:
+            external_audio = None
 
         # Read output quality from settings
         quality = self.settings.value("output/quality", "1080p", type=str)
@@ -1339,6 +1476,7 @@ class MainWindow(QMainWindow):
             output_path=output_path,
             speaker_switching_enabled=speaker_switching_enabled,
             camera_speaker_mapping=camera_mapping,
+            audio_sources=audio_sources,
             parent=self,
         )
 
