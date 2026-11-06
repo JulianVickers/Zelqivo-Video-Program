@@ -896,6 +896,24 @@ def build_single_pass_filter_complex_args(
     for source_path in unique_sources.keys():
         args.extend(["-i", source_path])
 
+    # Exact per-segment frame counts. Per-segment ``fps`` rounding loses or gains
+    # a fraction of a frame at every cut on sources that are off the output grid
+    # (29.97, 23.976, VFR), which accumulates into audio/video drift. Quantize
+    # cumulative boundaries instead, so the total always equals
+    # round(total_duration * fps) and no error accumulates.
+    frame_counts: list[int] = []
+    _cum_ms = 0.0
+    _prev_boundary = 0
+    for _c in cuts:
+        if hasattr(_c, 'source_path'):
+            _s, _e = _c.start_ms, _c.end_ms
+        else:
+            _s, _e = _c.get('start_ms', 0), _c.get('end_ms', 0)
+        _cum_ms += _e - _s
+        _boundary = round(_cum_ms / 1000.0 * fps)
+        frame_counts.append(max(0, _boundary - _prev_boundary))
+        _prev_boundary = _boundary
+
     # Build filter_complex
     filter_parts = []
     segment_labels = []
@@ -931,7 +949,8 @@ def build_single_pass_filter_complex_args(
             filter_parts.append(
                 f"color=c=black:s={out_width}x{out_height}:r={fps}:d={duration_sec:.3f},"
                 f"setsar=1,"
-                f"fps={fps}"
+                f"fps={fps},"
+                f"trim=end_frame={frame_counts[i]}"
                 f"[{black_label}]"
             )
             segment_labels.append(f"[{black_label}]")
@@ -952,7 +971,9 @@ def build_single_pass_filter_complex_args(
             f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease,"
             f"pad={out_width}:{out_height}:(ow-iw)/2:(oh-ih)/2:black,"
             f"setsar=1,"
-            f"fps={fps}"
+            f"fps={fps}:start_time=0,"
+            f"tpad=stop_mode=clone:stop=5,"
+            f"trim=end_frame={frame_counts[i]}"
             f"[{segment_label}]"
         )
         filter_parts.append(filter_chain)
