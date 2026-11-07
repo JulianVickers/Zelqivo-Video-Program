@@ -87,6 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a hardcoded path, and fail with a clear message pointing at BtbN LGPL builds.
 
 ### Fixed
+- Single-pass render no longer drifts against the session audio. Per-segment
+  `fps` rounding lost or gained a fraction of a frame at every cut on sources
+  that are off the output frame grid (29.97, 23.976, variable frame rate), which
+  added up to 0.593 s over 153 cuts on a real 22-minute session. Segments now
+  get exact frame counts from cumulative cut boundaries, so the output length
+  is `round(total * fps)` regardless of source frame rate.
+- Preflight no longer creates an empty directory at the output file path, which
+  made the session audio mux fail at 95% with "Is a directory".
 - Detection on audio sources no longer collapses on quiet mixer exports: the
   legacy absolute silence floor (0.01, tuned for hot camera audio) gated out
   almost everything (4 segments in 22 minutes on a real session). Sources now use

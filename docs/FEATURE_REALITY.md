@@ -114,6 +114,10 @@ These features require optional packages not in the core install:
 - **"Several people speak" is not implemented** in the wide-shot pass. On the real session, 2 or more sources were above their gates in 38% of 200 ms windows, but the median such stretch lasted 400 ms and only 27 lasted 2 s or more, with 3 at 5 s or more. A level-gap test separates most of them, but missing brief overlap costs little, so it was left out deliberately.
 - **Cutaways land only inside the wide camera's footage**, so a short wide clip gets no cutaways outside its own span.
 - Wide-shot thresholds (2 s nobody, 20 s hold, 3 s cutaway) are hard-coded; making them configurable is a later item.
+- **Render length is frame-exact.** Each segment is trimmed to a frame count taken from cumulative cut boundaries, so output video length matches the cut list on 29.97, 30, 23.976 and variable-frame-rate sources. Any drift left on a real session is the clock drift above, not the render.
+- **Audio source rows are not persisted**; they live in memory and must be re-entered each session.
+- **Per-camera `manual_offset_ms` and `exclude` overrides have no UI yet** (backend only).
+- **A cut shorter than half a frame would render as zero frames** (an empty segment). Not reachable with current gates (shortest real cut 2.2 s), so there is no guard.
 
 ## Backend Health Summary
 
